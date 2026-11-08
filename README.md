@@ -30,6 +30,26 @@
 
 ---
 
+## 🔬 REALISM PASS (auditoria + implementação)
+
+O diagnóstico completo está em **[`docs/REALISM_AUDIT.md`](docs/REALISM_AUDIT.md)**. Resumo do que mudou na camada que faz o cérebro acreditar:
+
+| Sistema | Antes | Agora |
+|---|---|---|
+| Iluminação | `scene.background` = cor chapada, sem IBL | céu analítico (Rayleigh/Mie, disco solar, nuvens, estrelas) + **PMREM/IBL** aplicado em `scene.environment` |
+| Sombras | 1 mapa 2048 px / frustum 220 m (~10,7 cm/texel) | 4096 px fitado no carro (~2,2 cm/texel) + texel snapping + contato projetado |
+| Pós-processamento | nenhum | HDR half-float 4×MSAA → bloom → DOF (modo foto) → ACES → grade (aberração radial, unsharp, vinheta, grão por luminância) + auto-exposição assimétrica |
+| Modo foto | `toDataURL` na resolução da janela | captura **supersampled 2×** com DOF e foco automático na distância do carro |
+| Pneus | 1 curva Pacejka sobre slip geométrico | modelo combinado (**elipse de atrito**), relaxação de 0,42 m, sensibilidade à carga, camber thrust, self-aligning torque, térmica, aquaplanagem |
+| Física | corpo rígido com yaw prescrito (`tan(steer)×ganho`) | corpo de 4 rodas a **240 Hz fixos**, torque por roda, inércia do motor refletida, atualização semi-implícita, ABS/TC/LSD, atitude emergente das cargas |
+| IA | posição = `curve.getPointAt()` (trilho) | **linha de mínima curvatura** + perfil de velocidade em 2 passadas + pure pursuit com erros humanos por piloto |
+| Áudio | 3 osciladores em frequências arbitrárias | **ordem de combustão** `rpm/60 × cil/2`, harmônicos por arquitetura, ressonância de escape, intake, convolução por ambiente, superfícies, **Doppler físico** |
+| Pista | textura 512 px esticada na volta inteira | UV métrico + normal/roughness procedurais + material físico com clearcoat por clima |
+
+Verificação: `npm run test` → 22 testes (invariantes físicos, perfil de IA, acústica, Doppler) · `npm run build` → limpo.
+
+---
+
 ## 🎮 Controles Rápidos
 - **`W / S` ou `↑ / ↓`**: Acelerar / Frear & Ré
 - **`A / D` ou `← / →`**: Direção

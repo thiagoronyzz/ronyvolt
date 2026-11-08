@@ -33,6 +33,7 @@ export interface BuiltTrackWorld {
   totalLengthM: number;
   roadWidth: number;
   isClosedLoop: boolean;
+  roadMaterial?: THREE.MeshPhysicalMaterial;
   destructibles: DestructibleProp[];
   hazards: HazardEntity[];
   animatedProps: { obj: THREE.Object3D; update: (t: number, dt: number) => void }[];
@@ -108,6 +109,112 @@ function createRoadSurfaceTexture(biome: BiomeTheme): THREE.CanvasTexture {
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
 }
+
+/**
+ * Procedural asphalt detail maps.
+ *
+ * The base colour texture is per-biome, but a road with a constant roughness and
+ * a flat normal has no *surface*: it reads as painted paper. Real asphalt is
+ * defined by micro-detail the eye picks up at grazing angles — that is where the
+ * light does its work.
+ *
+ * These maps are tileable, generated once, and applied with metric UVs (one tile
+ * per road-width of travel), so the aggregate grain is the same physical size on
+ * a 6 m kart track and a 20 m motorway.
+ */
+function hash2(x: number, y: number): number {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function valueNoise(x: number, y: number): number {
+  const xi = Math.floor(x);
+  const yi = Math.floor(y);
+  const xf = x - xi;
+  const yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi);
+  const b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1);
+  const d = hash2(xi + 1, yi + 1);
+  return a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v;
+}
+
+function createAsphaltDetailMaps(): { normalMap: THREE.CanvasTexture; roughnessMap: THREE.CanvasTexture } {
+  const size = 256;
+  const heights = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      let h = 0;
+      let amp = 0.55;
+      let freq = 0.14;
+      for (let o = 0; o < 3; o++) {
+        h += valueNoise(x * freq, y * freq) * amp;
+        amp *= 0.5;
+        freq *= 2.1;
+      }
+      h += hash2(x, y) * 0.16; // aggregate chips
+      heights[y * size + x] = h;
+    }
+  }
+
+  const normalCanvas = document.createElement('canvas');
+  normalCanvas.width = size;
+  normalCanvas.height = size;
+  const nctx = normalCanvas.getContext('2d')!;
+  const nimg = nctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4;
+      const hl = heights[y * size + ((x - 1 + size) % size)];
+      const hr = heights[y * size + ((x + 1) % size)];
+      const hu = heights[((y - 1 + size) % size) * size + x];
+      const hd = heights[((y + 1) % size) * size + x];
+      const dx = (hr - hl) * 1.6;
+      const dy = (hd - hu) * 1.6;
+      const len = Math.hypot(dx, dy, 1);
+      nimg.data[i] = Math.round(((-dx / len) * 0.5 + 0.5) * 255);
+      nimg.data[i + 1] = Math.round(((-dy / len) * 0.5 + 0.5) * 255);
+      nimg.data[i + 2] = Math.round(((1 / len) * 0.5 + 0.5) * 255);
+      nimg.data[i + 3] = 255;
+    }
+  }
+  nctx.putImageData(nimg, 0, 0);
+  const normalMap = new THREE.CanvasTexture(normalCanvas);
+  normalMap.wrapS = THREE.RepeatWrapping;
+  normalMap.wrapT = THREE.RepeatWrapping;
+  normalMap.anisotropy = 8;
+
+  // Roughness: mostly rough aggregate with a smoother, rubbered-in racing
+  // groove down the middle. This is why the racing line reads darker and
+  // slightly glossier in real footage.
+  const roughCanvas = document.createElement('canvas');
+  roughCanvas.width = size;
+  roughCanvas.height = size;
+  const rctx = roughCanvas.getContext('2d')!;
+  const rimg = rctx.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4;
+      const groove = Math.exp(-Math.pow((x / size - 0.5) / 0.16, 2));
+      const noise = valueNoise(x * 0.09, y * 0.09) * 0.22 + hash2(x, y) * 0.08;
+      const r = Math.round(Math.min(255, Math.max(0, (0.72 - groove * 0.26 + noise) * 255)));
+      rimg.data[i] = r;
+      rimg.data[i + 1] = r;
+      rimg.data[i + 2] = r;
+      rimg.data[i + 3] = 255;
+    }
+  }
+  rctx.putImageData(rimg, 0, 0);
+  const roughnessMap = new THREE.CanvasTexture(roughCanvas);
+  roughnessMap.wrapS = THREE.RepeatWrapping;
+  roughnessMap.wrapT = THREE.RepeatWrapping;
+  roughnessMap.anisotropy = 8;
+
+  return { normalMap, roughnessMap };
+}
+
 
 export function buildTrackWorld(
   track: TrackSpec,
@@ -222,6 +329,7 @@ export function buildTrackWorld(
 
   const up = new THREE.Vector3(0, 1, 0);
   const segCount = samplePoints.length;
+  let cumDist = 0;
 
   for (let i = 0; i <= segCount; i++) {
     const idx = isClosedLoop ? i % segCount : Math.min(segCount - 1, i);
@@ -236,7 +344,11 @@ export function buildTrackWorld(
     roadPositions.push(leftEdge.x, leftEdge.y + 0.03, leftEdge.z);
     roadPositions.push(rightEdge.x, rightEdge.y + 0.03, rightEdge.z);
 
-    const vCoord = i / segCount;
+    // Metric UVs: v advances one full texture tile per road-width of travel.
+    // Previously v was 0..1 across the whole lap, so on a 5 km circuit one texel
+    // covered ~10 metres and every surface detail was smeared into mush.
+    cumDist += i > 0 ? pt.distanceTo(samplePoints[Math.max(0, idx - 1)]) : 0;
+    const vCoord = cumDist / Math.max(4, roadWidth);
     roadUvs.push(0, vCoord, 1, vCoord);
 
     // Kerbs along both edges
@@ -273,10 +385,24 @@ export function buildTrackWorld(
   roadGeo.setIndex(roadIndices);
   roadGeo.computeVertexNormals();
 
-  const roadMat = new THREE.MeshStandardMaterial({
-    map: createRoadSurfaceTexture(track.biome),
-    roughness: track.biome === 'neo_tokyo' || track.biome === 'rc_bathroom' ? 0.22 : 0.68,
-    metalness: track.biome === 'neo_tokyo' ? 0.35 : 0.08,
+  const baseRoadTex = createRoadSurfaceTexture(track.biome);
+  baseRoadTex.wrapT = THREE.RepeatWrapping;
+  baseRoadTex.wrapS = THREE.ClampToEdgeWrapping;
+  baseRoadTex.anisotropy = 8;
+  const detail = createAsphaltDetailMaps();
+  const glossyFloor = track.biome === 'neo_tokyo' || track.biome === 'rc_bathroom';
+  const roadMat = new THREE.MeshPhysicalMaterial({
+    map: baseRoadTex,
+    normalMap: glossyFloor ? null : detail.normalMap,
+    normalScale: new THREE.Vector2(0.55, 0.55),
+    roughnessMap: glossyFloor ? null : detail.roughnessMap,
+    roughness: glossyFloor ? 0.22 : 0.78,
+    metalness: track.biome === 'neo_tokyo' ? 0.35 : 0.02,
+    // Wet asphalt is a water film over a rough substrate — which is exactly what
+    // clearcoat models. Dry, it stays subtle so the aggregate still reads.
+    clearcoat: glossyFloor ? 0.8 : 0.08,
+    clearcoatRoughness: glossyFloor ? 0.06 : 0.5,
+    envMapIntensity: 1.0,
   });
   const roadMesh = new THREE.Mesh(roadGeo, roadMat);
   roadMesh.receiveShadow = true;
@@ -712,6 +838,7 @@ export function buildTrackWorld(
     totalLengthM,
     roadWidth,
     isClosedLoop,
+    roadMaterial: roadMat,
     destructibles,
     hazards,
     animatedProps,

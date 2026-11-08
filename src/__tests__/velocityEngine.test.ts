@@ -33,6 +33,9 @@ beforeAll(() => {
       arc: () => {},
       fill: () => {},
       fillText: () => {},
+      createImageData: (w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
+      putImageData: () => {},
+      getImageData: (x: number, y: number, w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }),
     };
     (globalThis as unknown as { document: unknown }).document = {
       createElement: () => ({

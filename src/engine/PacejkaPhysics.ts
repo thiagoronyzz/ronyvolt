@@ -35,7 +35,7 @@ export const ENGINE_SWAPS: EngineSwapProfile[] = [
   { type: 'nuclear_turbine', label: 'Turbina de Fissão Compacta Cherenkov (3.500cv)', baseHp: 3500, baseTorqueNm: 3100, maxRpm: 15000, engineWeightKg: 390 },
 ];
 
-const COMPOUND_PARAMS: Record<
+export const COMPOUND_PARAMS: Record<
   TireCompound,
   { peakD: number; stiffnessB: number; optTempC: number; wearRate: number; wetBonus: number }
 > = {
@@ -49,7 +49,7 @@ const COMPOUND_PARAMS: Record<
   drift: { peakD: 0.86, stiffnessB: 7.4, optTempC: 95, wearRate: 1.45, wetBonus: 0.75 },
 };
 
-const BRAND_GRIP_MOD: Record<TireBrand, number> = {
+export const BRAND_GRIP_MOD: Record<TireBrand, number> = {
   Michelin: 1.03,
   Pirelli: 1.04,
   Bridgestone: 1.02,
