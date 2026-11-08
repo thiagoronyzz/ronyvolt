@@ -352,7 +352,10 @@ export class RealismRenderer {
       },
     });
 
-    this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(4000, 48, 32), this.skyMat);
+    // Radius must stay inside the camera's far plane (2800 in this build) or the
+    // dome is clipped and the sky renders black. Because the material writes no
+    // depth and draws first, a small dome still covers geometry beyond it.
+    this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(1200, 48, 32), this.skyMat);
     this.skyMesh.frustumCulled = false;
     this.skyMesh.renderOrder = -1000;
     this.scene.add(this.skyMesh);
@@ -660,8 +663,10 @@ export class RealismRenderer {
     this.gradePass.uniforms.uGrain.value = active ? 0.036 : 0.024;
     this.gradePass.uniforms.uVignette.value = active ? 0.5 : 0.38;
     if (active) {
-      const uniforms = (this.bokehPass as unknown as { materialBokeh: { uniforms: Record<string, { value: number }> } })
-        .materialBokeh.uniforms;
+      const bokeh = this.bokehPass as unknown as {
+        materialBokeh?: { uniforms?: Record<string, { value: number }> };
+      };
+      const uniforms = bokeh.materialBokeh?.uniforms;
       if (uniforms?.focus) uniforms.focus.value = focusDistance;
       if (uniforms?.maxblur) uniforms.maxblur.value = 0.0075;
     }

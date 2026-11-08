@@ -43,6 +43,10 @@ interface BotRacerInstance {
   headingRad: number;
   follower?: RacingLineFollower;
   stuckTimer: number;
+  /** Cached at spawn: recomputing effective stats per frame per bot allocates
+   *  thousands of objects per second and shows up as GC stutter. */
+  massKg: number;
+  maxAccelMs2: number;
 }
 
 /** Extra braking distance a bot applies when closing on a slower car ahead. */
@@ -558,6 +562,8 @@ export class VelocityEngine {
         lastFlybyTime: 0,
         headingRad: Math.atan2(this.trackWorld!.curve.getTangentAt(startProg).x, this.trackWorld!.curve.getTangentAt(startProg).z),
         stuckTimer: 0,
+        massKg: 0,
+        maxAccelMs2: 0,
         follower: this.racingLine
           ? new RacingLineFollower(this.racingLine, {
               skill: profile.skill,
@@ -568,6 +574,13 @@ export class VelocityEngine {
             })
           : undefined,
       });
+      const bot = this.bots[this.bots.length - 1];
+      const botStats = computeEffectiveCarStats(botSpec, botTune);
+      bot.massKg = Math.max(300, botStats.effectiveWeightKg);
+      bot.maxAccelMs2 = Math.min(
+        13,
+        (botStats.effectiveTorqueNm * 3.4 * 3.6 * 0.85) / 0.33 / bot.massKg
+      );
     }
 
     // Build Weather Particle Cloud (Rain / Snow / Sand / Sakura / Acid Rain)
@@ -1514,9 +1527,8 @@ export class VelocityEngine {
       steer = Math.max(-1, Math.min(1, steer + trafficSteer));
 
       // --- Longitudinal integration ---------------------------------------
-      const stats = computeEffectiveCarStats(b.carSpec, createDefaultTuneForCar(b.carSpec));
-      const massKg = Math.max(300, stats.effectiveWeightKg);
-      const maxAccelMs2 = Math.min(13, ((stats.effectiveTorqueNm * 3.4 * 3.6 * 0.85) / 0.33) / massKg);
+      const massKg = Math.max(300, b.massKg);
+      const maxAccelMs2 = b.maxAccelMs2;
       const maxBrakeMs2 = Math.min(16, (1.05 * 9.81) * (cornerCurvature > 0.02 ? 1 : 0.85));
       const dragAccel = (0.5 * 1.225 * 2.05 * 0.42 * b.speedMs * b.speedMs) / massKg;
       const accel = throttle * maxAccelMs2 - brake * maxBrakeMs2 - dragAccel - 0.12;

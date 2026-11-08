@@ -323,20 +323,10 @@ export function evaluateTire(input: TireEvaluationInput): TireContactState {
   const deltaT = ((slipPowerW * 0.42 - coolingW) / Math.max(400, thermal.treadHeatCapacityJK)) * dt;
   state.surfaceTempC = Math.max(thermal.ambientC, Math.min(190, state.surfaceTempC + deltaT));
 
-  if (spectacular(slipPowerW)) {
-    const wearDelta =
-      (dt * thermal.wearRate * (0.02 + Math.abs(state.slipRatio) * 0.5 + Math.abs(state.slipAngleRad) * 0.9) *
-        Math.min(3.5, slipPowerW / 5200)) /
-      1000;
-    state.wear = Math.max(0, state.wear - wearDelta);
-  }
-
+  // Wear is integrated by the vehicle body, where the friction utilisation and
+  // the compound's stint length are both known. Doing it here as well would
+  // double-count it — a bug that makes a set of tyres last half a stint.
   return state;
-}
-
-function spectacular(slipPowerW: number): boolean {
-  // Wear only accrues when the tyre is actually working (avoids idle wear).
-  return slipPowerW > 900;
 }
 
 /** Tyre specs by compound, tuned against real F1/GT3 data ranges. */
