@@ -13,12 +13,16 @@ import {
   TrackSpec,
   WeatherPreset,
 } from '../types/game';
-import { AssistMode, computeEffectiveCarStats, VehiclePhysicsBody } from './PacejkaPhysics';
+import { AssistMode, computeEffectiveCarStats } from './PacejkaPhysics';
+import { VehicleDynamicsBody } from './VehicleDynamics';
 import { buildCarMesh, BuiltCarRig } from '../cars/CarMeshBuilder';
 import { buildGarageShowroom, buildTrackWorld, BuiltTrackWorld } from '../tracks/TrackBuilder';
 import { CAR_CATALOG, createDefaultTuneForCar } from '../data/carCatalog';
 import { BOT_ROSTER } from '../data/botRoster';
+import { WEATHER_PRESETS } from '../data/weatherCatalog';
 import { audioEngine } from '../audio/VelocityAudioEngine';
+import { RealismRenderer } from '../render/RealismRenderer';
+import { buildRacingLine, RacingLine, RacingLineFollower } from '../ai/RacingLine';
 
 interface BotRacerInstance {
   profile: BotDriverProfile;
@@ -36,6 +40,14 @@ interface BotRacerInstance {
   isPolice: boolean;
   sirenGroup?: THREE.Group;
   lastFlybyTime: number;
+  headingRad: number;
+  follower?: RacingLineFollower;
+  stuckTimer: number;
+}
+
+/** Extra braking distance a bot applies when closing on a slower car ahead. */
+function nearestLateralGap(aheadM: number, lateralM: number): number {
+  return Math.max(0, (18 - aheadM) * 0.09 + lateralM * 0.05);
 }
 
 interface GhostSample {
@@ -67,6 +79,9 @@ export class VelocityEngine {
   private camera: THREE.PerspectiveCamera;
   private sunLight: THREE.DirectionalLight;
   private hemiLight: THREE.HemisphereLight;
+  private realism!: RealismRenderer;
+  private contactShadows = new Map<THREE.Object3D, THREE.Mesh>();
+  private shadowTmp = new THREE.Vector3();
 
   private animFrameId: number | null = null;
   private lastPerfNow = performance.now();
@@ -109,8 +124,9 @@ export class VelocityEngine {
 
   private trackWorld: BuiltTrackWorld | null = null;
   private playerRig: BuiltCarRig | null = null;
-  private playerBody = new VehiclePhysicsBody(24);
+  private playerBody = new VehicleDynamicsBody(24);
   private bots: BotRacerInstance[] = [];
+  private racingLine: RacingLine | null = null;
 
   // Weather & Smoke Particles
   private precipPoints: THREE.Points | null = null;
@@ -188,13 +204,15 @@ export class VelocityEngine {
       2800
     );
 
+    this.realism = new RealismRenderer(this.renderer, this.scene, this.camera);
+
     this.hemiLight = new THREE.HemisphereLight(0x90e0ef, 0x1e2430, 0.85);
     this.scene.add(this.hemiLight);
 
     this.sunLight = new THREE.DirectionalLight(0xfff4e0, 2.4);
     this.sunLight.position.set(120, 180, 90);
     this.sunLight.castShadow = true;
-    this.sunLight.shadow.mapSize.set(2048, 2048);
+    this.sunLight.shadow.mapSize.set(4096, 4096);
     this.sunLight.shadow.camera.near = 2;
     this.sunLight.shadow.camera.far = 600;
     const d = 110;
@@ -445,6 +463,30 @@ export class VelocityEngine {
     const startTan = this.trackWorld.sampleTangents[0];
     const startHeading = Math.atan2(startTan.x, startTan.z);
 
+    this.racingLine = null;
+    if (this.trackWorld) {
+      // Build the offline-optimised racing line + speed profile. Cached per
+      // track/surface: the profile depends on mu, power and downforce, so it is
+      // rebuilt whenever those change.
+      const stats = computeEffectiveCarStats(config.car, config.tune);
+      try {
+        this.racingLine = buildRacingLine({
+          curve: this.trackWorld.curve,
+          roadWidthM: this.trackWorld.roadWidth,
+          totalLengthM: this.trackWorld.totalLengthM,
+          closed: this.trackWorld.isClosedLoop,
+          mu: Math.min(1.35, config.car.baseGrip * config.weather.gripMultiplier),
+          massKg: stats.effectiveWeightKg,
+          clA: Math.max(0.4, stats.clDownforce) * 2.05,
+          powerW: stats.effectiveHp * 745.7,
+          brakeMuScale: 1.15,
+          gravityG: config.track.gravityG,
+        });
+      } catch {
+        this.racingLine = null; // fall back to the legacy spline follower
+      }
+    }
+
     this.playerRig = buildCarMesh(config.car, config.tune);
     this.scene.add(this.playerRig.root);
     this.playerBody.resetAt(
@@ -514,12 +556,36 @@ export class VelocityEngine {
         isPolice,
         sirenGroup,
         lastFlybyTime: 0,
+        headingRad: Math.atan2(this.trackWorld!.curve.getTangentAt(startProg).x, this.trackWorld!.curve.getTangentAt(startProg).z),
+        stuckTimer: 0,
+        follower: this.racingLine
+          ? new RacingLineFollower(this.racingLine, {
+              skill: profile.skill,
+              consistency: profile.consistency,
+              aggression: profile.aggression,
+              tireManagement: profile.tireManagement,
+              seed: i * 137 + config.track.seed,
+            })
+          : undefined,
       });
     }
 
     // Build Weather Particle Cloud (Rain / Snow / Sand / Sakura / Acid Rain)
     this.buildWeatherParticles(config.weather);
     this.updateAtmosphereAndSky(0);
+
+    // Reverb character per venue: a tunnel and an open circuit must not share
+    // the same impulse response.
+    const biome = config.track.biome;
+    const env =
+      biome.includes('tunnel') || biome.includes('orbital') || biome.includes('submarine')
+        ? 'tunnel'
+        : biome.includes('neo_tokyo') || biome.includes('london') || biome.includes('sao_paulo') || biome.includes('dubai')
+        ? 'city'
+        : biome.includes('canyon') || biome.includes('desert') || biome.includes('mars')
+        ? 'canyon'
+        : 'open';
+    audioEngine.setAcousticEnvironment(env);
 
     // Reset counters
     this.playerLap = 1;
@@ -557,6 +623,11 @@ export class VelocityEngine {
       this.scene.remove(this.precipPoints);
       this.precipPoints = null;
     }
+    // Rain is delegated to the streak system (camera-following volume, per-drop
+    // velocity, motion-blurred line segments). A PointsMaterial cloud of dots
+    // always reads as particles, never as water.
+    this.realism.updatePrecipitation(this.camera, weather);
+    if (weather.precipitationType === 'rain' || weather.precipitationType === 'acid_rain') return;
     if (weather.precipitationType === 'none' || weather.precipitationIntensity <= 0.01) return;
 
     const count = Math.floor(2200 * weather.precipitationIntensity) + 400;
@@ -618,22 +689,79 @@ export class VelocityEngine {
       skyMix.setHex(0xe0fbfc);
     }
 
-    this.scene.background = skyMix;
-    this.scene.fog = new THREE.FogExp2(skyMix.getHex(), this.currentWeather.visibilityFog);
+    // Physical sky + image-based lighting. `skyMix` is still used for the fog
+    // tint fallback, but the visible sky is now an analytic dome and the
+    // environment map is PMREM-filtered from it — this is what gives clearcoat,
+    // chrome and glass something real to reflect.
+    const sunDir = new THREE.Vector3(Math.cos(sunAngle), Math.max(-0.25, sunElev), 0.42).normalize();
+    this.realism.updateSky(
+      {
+        weather: this.currentWeather,
+        hourOfDay: this.hourOfDay,
+        sunDirection: sunDir,
+        dayFactor,
+        lightning: lightningFlash,
+      },
+      dt
+    );
+
+    // Wet road response: a water film raises clearcoat, drops roughness and
+    // boosts the specular response. This is what turns a matte strip into the
+    // mirror-like wet asphalt that reads as "it is raining" in a still frame.
+    const roadMat = this.trackWorld?.roadMaterial;
+    if (roadMat) {
+      const wet = this.currentWeather.wetness;
+      const targetClearcoat = 0.08 + wet * 0.9;
+      const targetRough = 0.78 - wet * 0.46;
+      roadMat.clearcoat += (targetClearcoat - roadMat.clearcoat) * Math.min(1, dt * 0.6);
+      roadMat.roughness += (targetRough - roadMat.roughness) * Math.min(1, dt * 0.6);
+      roadMat.clearcoatRoughness = 0.5 - wet * 0.42;
+      roadMat.envMapIntensity = 1.0 + wet * 0.9;
+    }
 
     this.sunLight.intensity = lightningFlash ? 6.5 : 0.2 + dayFactor * 2.4;
     this.sunLight.color.setHex(isGoldenHour ? 0xffae42 : dayFactor < 0.2 ? 0x6488ea : 0xfff5e4);
-    this.hemiLight.intensity = 0.25 + dayFactor * 0.65;
+    this.hemiLight.intensity = 0.12 + dayFactor * 0.4;
 
     if (this.playerRig) {
-      this.sunLight.position.set(
-        this.playerBody.x + Math.cos(sunAngle) * 110,
-        Math.max(25, Math.sin(sunAngle) * 160 + 40),
-        this.playerBody.z + 75
-      );
-      this.sunLight.target.position.set(this.playerBody.x, this.playerBody.y, this.playerBody.z);
-      this.sunLight.target.updateMatrixWorld();
+      // Shadow cascade follows the car, texel-snapped, so the contact shadow
+      // does not crawl or blur out at distance.
+      this.shadowTmp.set(this.playerBody.x, this.playerBody.y, this.playerBody.z);
+      this.realism.updateSunShadow(this.sunLight, this.shadowTmp, 46);
     }
+  }
+
+  /** Sky/environment refresh for scenes that don't run the weather update (garage). */
+  private updateSkyForFrame(dt: number): void {
+    // The garage needs image-based lighting as much as the track: it is where
+    // the player looks at paint. Fall back to a clear preset before any race.
+    const weather = this.currentWeather ?? WEATHER_PRESETS.find((w) => w.category === 'clear') ?? WEATHER_PRESETS[0];
+    if (!weather) return;
+    const sunAngle = ((this.hourOfDay - 6) / 24) * Math.PI * 2;
+    const sunElev = Math.sin(sunAngle);
+    const dayFactor = THREE.MathUtils.clamp((sunElev + 0.18) / 0.55, 0.04, 1.0);
+    this.realism.updateSky(
+      {
+        weather,
+        hourOfDay: this.hourOfDay,
+        sunDirection: new THREE.Vector3(Math.cos(sunAngle), Math.max(-0.25, sunElev), 0.42).normalize(),
+        dayFactor,
+        lightning: false,
+      },
+      dt
+    );
+  }
+
+  /** Ground-projected contact occlusion under a car. */
+  private updateContactShadow(root: THREE.Object3D, widthM: number, lengthM: number): void {
+    let shadow = this.contactShadows.get(root);
+    if (!shadow) {
+      shadow = this.realism.createContactShadow(widthM, lengthM);
+      this.contactShadows.set(root, shadow);
+      if (this.trackWorld) this.trackWorld.group.add(shadow);
+    }
+    shadow.position.set(root.position.x, root.position.y + 0.045, root.position.z);
+    shadow.rotation.z = -root.rotation.y;
   }
 
   public recoverCarToTrack(): void {
@@ -751,12 +879,15 @@ export class VelocityEngine {
     }
     if (opts?.exposure !== undefined) {
       this.renderer.toneMappingExposure = opts.exposure;
+      this.realism.setManualExposure(opts.exposure);
+    } else if (!active) {
+      this.realism.setManualExposure(null);
     }
+    this.realism.setPhotoMode(active, this.photoDist);
   }
 
   public captureSnapshotDataUrl(): string {
-    this.renderer.render(this.scene, this.camera);
-    return this.renderer.domElement.toDataURL('image/png');
+    return this.realism.capturePhoto();
   }
 
   public exportTelemetryCsv(): string {
@@ -812,7 +943,7 @@ export class VelocityEngine {
   }
 
   private clearDynamicScene(): void {
-    const keep = new Set<THREE.Object3D>([this.hemiLight, this.sunLight, this.sunLight.target]);
+    const keep = new Set<THREE.Object3D>([this.hemiLight, this.sunLight, this.sunLight.target, this.realism.skyObject]);
     for (let i = this.scene.children.length - 1; i >= 0; i--) {
       const ch = this.scene.children[i];
       if (!keep.has(ch)) {
@@ -823,6 +954,7 @@ export class VelocityEngine {
     this.activeProjectiles = [];
     this.precipPoints = null;
     this.ghostMesh = null;
+    this.contactShadows.clear();
   }
 
   private startLoop(): void {
@@ -836,11 +968,12 @@ export class VelocityEngine {
 
       if (this.sceneMode === 'garage') {
         this.stepGarage(dt);
+        this.updateSkyForFrame(dt);
       } else {
         this.stepRace(dt);
       }
 
-      this.renderer.render(this.scene, this.camera);
+      this.realism.render(dt);
     };
     this.animFrameId = requestAnimationFrame(tick);
   }
@@ -937,6 +1070,12 @@ export class VelocityEngine {
     }
 
     this.updateAtmosphereAndSky(dt);
+    const windMs = this.currentWeather.windSpeedKmh / 3.6;
+    this.realism.advancePrecipitation(
+      dt,
+      Math.sin(this.currentWeather.windAngleRad) * windMs,
+      Math.cos(this.currentWeather.windAngleRad) * windMs
+    );
 
     // Pre-race Countdown
     if (this.countdownSec > 0) {
@@ -1076,6 +1215,8 @@ export class VelocityEngine {
       tireWearEnabled: this.tireWearEnabled,
       fuelConsumptionEnabled: this.fuelEnabled,
       turboStarBoost: this.turboStarTimer > 0 ? 1.48 : 1.0,
+      gradeSin: nearest.tangent.y,
+      allowReverse: canMove,
     });
     this.shiftUpQueued = false;
     this.shiftDownQueued = false;
@@ -1163,6 +1304,7 @@ export class VelocityEngine {
     // Update Player 3D Mesh
     this.playerRig.root.position.set(this.playerBody.x, this.playerBody.y, this.playerBody.z);
     this.playerRig.root.rotation.y = this.playerBody.headingRad;
+    this.updateContactShadow(this.playerRig.root, 2.4, 5.2);
     const isNight = this.hourOfDay < 6.3 || this.hourOfDay > 18.2 || this.currentWeather.visibilityFog > 0.005;
 
     this.playerRig.updateRealtimeVisuals({
@@ -1200,6 +1342,7 @@ export class VelocityEngine {
 
     // Update Audio Engine
     const stats = computeEffectiveCarStats(this.currentCar, this.currentTune);
+    audioEngine.setSurface(surfaceName, this.currentWeather.wetness);
     audioEngine.updateFrame({
       rpm: this.playerBody.rpm,
       maxRpm: stats.maxRpm,
@@ -1210,6 +1353,11 @@ export class VelocityEngine {
       cameraView: this.cameraView,
       isPaused: false,
       engineDamaged: this.playerBody.damage.engineHealth < 55,
+      brake: rawBrake,
+      // Load = torque actually being produced, not just pedal position. This is
+      // what makes the exhaust note change when you back off the throttle at
+      // constant rpm (engine braking) instead of only when the revs move.
+      load: rawThrottle * (0.45 + (this.playerBody.rpm / Math.max(1000, stats.maxRpm)) * 0.55),
     });
 
     // Emit Telemetry Frame
@@ -1288,77 +1436,148 @@ export class VelocityEngine {
         continue;
       }
 
-      // Compute curvature ahead to brake realistically for corners!
-      const aheadProg = (b.splineProgress + 0.025) % 1;
-      const pNow = this.trackWorld.curve.getTangentAt(b.splineProgress);
-      const pAhead = this.trackWorld.curve.getTangentAt(aheadProg);
-      const turnSharpness = 1 - Math.max(-1, Math.min(1, pNow.dot(pAhead)));
-
-      const skillFactor = 0.72 + (b.profile.skill / 10) * 0.34;
+      const root = b.rig.root;
       const weatherAdapt = 1 - (1 - this.currentWeather.gripMultiplier) * (1.2 - b.profile.adaptability * 0.06);
-      const baseTopMs = Math.min(92, (b.carSpec.topSpeedKmh / 3.6) * 0.78 * skillFactor * weatherAdapt);
-      const cornerCapMs = Math.max(17, baseTopMs * (1 - turnSharpness * 3.1));
+      const skillFactor = 0.72 + (b.profile.skill / 10) * 0.34;
 
-      const desiredSpeed = canMove ? cornerCapMs : 0;
-      b.speedMs += (desiredSpeed - b.speedMs) * Math.min(1, dt * 3.2);
+      // --- Driver model ---------------------------------------------------
+      // The bot now drives: it has a position, a heading and a speed of its own,
+      // and it steers with pure pursuit toward an optimised racing line. Its
+      // heading therefore *deviates* from the track tangent (slip angle, small
+      // corrections, occasional wide exits), which is the single most important
+      // difference between this and the old spline-glued bots.
+      let throttle = 0;
+      let brake = 0;
+      let steer = 0;
+      let targetSpeedMs = 0;
+      let cornerCurvature = 0;
 
-      // Rivalry / Ally tactical lane behavior when near player!
-      const distToPlayer = b.rig.root.position.distanceTo(this.playerRig!.root.position);
-      if (distToPlayer < 24) {
-        const playerNear = this.trackWorld.sampleNearest(this.playerBody.x, this.playerBody.z);
-        if (b.rivalryScore >= 2 || b.isPolice || b.profile.aggression >= 8) {
-          // Rival or Police tries to close the door / block player's lane!
-          b.targetLaneOffset = THREE.MathUtils.clamp(playerNear.lateralOffset, -5, 5);
-        } else if (b.rivalryScore <= -1 || b.profile.sportsmanship >= 8) {
-          // Gentleman / Ally opens space cleanly!
-          b.targetLaneOffset = playerNear.lateralOffset >= 0 ? -3.8 : 3.8;
-        }
-      } else if (Math.random() < dt * 0.3) {
-        b.targetLaneOffset = (Math.random() - 0.5) * (this.trackWorld.roadWidth * 0.6);
-      }
-
-      b.laneOffset += (b.targetLaneOffset - b.laneOffset) * Math.min(1, dt * 2.5);
-
-      const prevProg = b.splineProgress;
-      b.splineProgress += (b.speedMs * dt) / Math.max(120, len);
-      if (this.trackWorld.isClosedLoop) {
-        if (b.splineProgress >= 1) {
-          b.splineProgress -= 1;
-          b.lap++;
+      if (b.follower) {
+        const cmd = b.follower.update(dt, {
+          x: root.position.x,
+          z: root.position.z,
+          headingRad: b.headingRad,
+          speedMs: b.speedMs,
+        });
+        targetSpeedMs = cmd.targetSpeedMs * weatherAdapt;
+        throttle = cmd.throttle;
+        brake = cmd.brake;
+        steer = cmd.steer;
+        if (this.racingLine) {
+          cornerCurvature = this.racingLine.samples[cmd.sampleIndex % this.racingLine.samples.length].curvature;
         }
       } else {
-        b.splineProgress = Math.min(0.995, b.splineProgress);
+        // Legacy fallback: curvature lookahead.
+        const aheadProg = (b.splineProgress + 0.025) % 1;
+        const pNow = this.trackWorld.curve.getTangentAt(b.splineProgress);
+        const pAhead = this.trackWorld.curve.getTangentAt(aheadProg);
+        const turnSharpness = 1 - Math.max(-1, Math.min(1, pNow.dot(pAhead)));
+        const baseTopMs = Math.min(92, (b.carSpec.topSpeedKmh / 3.6) * 0.78 * skillFactor * weatherAdapt);
+        targetSpeedMs = Math.max(17, baseTopMs * (1 - turnSharpness * 3.1));
+        const err = targetSpeedMs - b.speedMs;
+        throttle = Math.max(0, Math.min(1, err * 0.4));
+        brake = Math.max(0, Math.min(1, -err * 0.5));
+        steer = Math.max(-1, Math.min(1, (aheadProg - b.splineProgress) * 40));
+        cornerCurvature = turnSharpness;
       }
-      void prevProg;
 
-      const pt = this.trackWorld.curve.getPointAt(b.splineProgress);
-      const tan = this.trackWorld.curve.getTangentAt(b.splineProgress).normalize();
-      const rightX = tan.z;
-      const rightZ = -tan.x;
+      if (!canMove) {
+        throttle = 0;
+        brake = 1;
+      }
 
-      const bx = pt.x - rightX * b.laneOffset;
-      const bz = pt.z - rightZ * b.laneOffset;
-      const heading = Math.atan2(tan.x, tan.z);
+      // --- Traffic awareness ----------------------------------------------
+      // Bots must not drive through the player. They modulate speed when the
+      // player is directly ahead in their lane, and rivals add a deliberate
+      // lateral push (close the door) instead of magically overlapping.
+      const distToPlayer = root.position.distanceTo(this.playerRig!.root.position);
+      let trafficSteer = 0;
+      if (distToPlayer < 22) {
+        const dxp = this.playerBody.x - root.position.x;
+        const dzp = this.playerBody.z - root.position.z;
+        const ahead =
+          dxp * Math.sin(b.headingRad) + dzp * Math.cos(b.headingRad);
+        const lateral =
+          dxp * Math.cos(b.headingRad) - dzp * Math.sin(b.headingRad);
+        if (ahead > 0.5 && Math.abs(lateral) < 3.2) {
+          const closing = nearestLateralGap(ahead, Math.abs(lateral));
+          targetSpeedMs = Math.min(targetSpeedMs, Math.max(3, b.speedMs - closing * 1.4));
+          if (ahead < 7 && b.profile.aggression < 7) brake = Math.max(brake, 0.35);
+        }
+        if (b.rivalryScore >= 2 || b.isPolice || b.profile.aggression >= 8) {
+          // Steer toward the player's side to defend the line.
+          trafficSteer = Math.max(-0.35, Math.min(0.35, lateral * 0.08));
+        } else if (b.rivalryScore <= -1 || b.profile.sportsmanship >= 8) {
+          trafficSteer = -Math.max(-0.3, Math.min(0.3, lateral * 0.06));
+        }
+      }
+      steer = Math.max(-1, Math.min(1, steer + trafficSteer));
 
-      b.rig.root.position.set(bx, pt.y, bz);
-      b.rig.root.rotation.y = heading;
+      // --- Longitudinal integration ---------------------------------------
+      const stats = computeEffectiveCarStats(b.carSpec, createDefaultTuneForCar(b.carSpec));
+      const massKg = Math.max(300, stats.effectiveWeightKg);
+      const maxAccelMs2 = Math.min(13, ((stats.effectiveTorqueNm * 3.4 * 3.6 * 0.85) / 0.33) / massKg);
+      const maxBrakeMs2 = Math.min(16, (1.05 * 9.81) * (cornerCurvature > 0.02 ? 1 : 0.85));
+      const dragAccel = (0.5 * 1.225 * 2.05 * 0.42 * b.speedMs * b.speedMs) / massKg;
+      const accel = throttle * maxAccelMs2 - brake * maxBrakeMs2 - dragAccel - 0.12;
+      b.speedMs = Math.max(0, Math.min(b.carSpec.topSpeedKmh / 3.6 * 0.98, b.speedMs + accel * dt));
+
+      // Off-track penalty: bots lose time on the grass instead of floating over it.
+      const near = this.trackWorld.sampleNearest(root.position.x, root.position.z);
+      const halfRoad = this.trackWorld.roadWidth * 0.5;
+      if (Math.abs(near.lateralOffset) > halfRoad - 0.3) {
+        b.speedMs *= 1 - Math.min(0.55, dt * 1.4);
+      }
+
+      // --- Yaw integration (tyre-limited) ---------------------------------
+      const wheelbaseM = 2.7;
+      const yawDemand = (b.speedMs / wheelbaseM) * Math.tan(steer * 0.42);
+      const maxYawRate = Math.min(1.9, 12.5 / Math.max(5, b.speedMs));
+      const yawRate = Math.max(-maxYawRate, Math.min(maxYawRate, yawDemand));
+      b.headingRad += yawRate * dt;
+      root.position.x += Math.sin(b.headingRad) * b.speedMs * dt;
+      root.position.z += Math.cos(b.headingRad) * b.speedMs * dt;
+
+      // Hard containment: if a bot runs wide, it is pushed back toward the
+      // track instead of leaving the world (belt-and-braces for tight hairpins).
+      const post = this.trackWorld.sampleNearest(root.position.x, root.position.z);
+      if (Math.abs(post.lateralOffset) > halfRoad + 2.5) {
+        const sign = Math.sign(post.lateralOffset);
+        const rightX = post.tangent.z;
+        const rightZ = -post.tangent.x;
+        root.position.x = post.point.x - rightX * sign * (halfRoad + 2.2);
+        root.position.z = post.point.z - rightZ * sign * (halfRoad + 2.2);
+        b.speedMs *= 0.82;
+      }
+      root.position.y = post.point.y;
+      root.rotation.y = b.headingRad;
+
+      // Lap bookkeeping from the actual position, not the spline parameter.
+      if (b.splineProgress > 0.85 && post.progress < 0.15) b.lap++;
+      else if (b.splineProgress < 0.15 && post.progress > 0.85) b.lap = Math.max(1, b.lap - 1);
+      b.splineProgress = post.progress;
+
+      const steerVisual = Math.max(-1, Math.min(1, steer));
+      this.updateContactShadow(b.rig.root, 2.4, 5.2);
 
       b.rig.updateRealtimeVisuals({
         dt,
         speedKmh: b.speedMs * 3.6,
-        steering: (b.targetLaneOffset - b.laneOffset) * 0.25,
+        steering: steerVisual,
         wheelSpinRad: this.elapsedSec * b.speedMs * 2.2,
-        brakeTempC: turnSharpness > 0.04 ? 520 : 180,
+        brakeTempC: brake > 0.3 ? 620 : 180,
         engineTempC: 94,
-        backfireActive: turnSharpness > 0.06 && Math.random() < 0.2,
+        backfireActive: throttle < 0.1 && b.speedMs > 18 && Math.random() < 0.12,
         nitroActive: false,
         doorsOpen: false,
         hoodOpen: false,
         trunkOpen: false,
         cfdVisible: false,
         bassEnergy: 0,
-        pitchRad: 0,
-        rollRad: 0,
+        // Body attitude from the same driver inputs: braking pitches the nose
+        // down, cornering rolls the body onto the outside wheels.
+        pitchRad: -brake * 0.028 + throttle * 0.012,
+        rollRad: steerVisual * Math.min(0.09, (b.speedMs * Math.abs(yawRate)) / 220),
         headlightsOn: isNight,
         shieldActive: false,
         damage: this.playerBody.damage,
@@ -1373,8 +1592,8 @@ export class VelocityEngine {
 
       // Car-to-Car Collision, Rivalry System & Multiplayer Anti-Troll Analysis!
       if (distToPlayer < 2.95) {
-        const pushX = this.playerBody.x - bx;
-        const pushZ = this.playerBody.z - bz;
+        const pushX = this.playerBody.x - root.position.x;
+        const pushZ = this.playerBody.z - root.position.z;
         const pLen = Math.max(0.1, Math.hypot(pushX, pushZ));
         this.playerBody.x += (pushX / pLen) * 0.95;
         this.playerBody.z += (pushZ / pLen) * 0.95;

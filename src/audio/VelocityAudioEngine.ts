@@ -1,4 +1,5 @@
 import { CameraView, CarSpec, CarTuneSetup, EngineType } from '../types/game';
+import { AcousticEnvironment, EngineAcoustics } from './EngineAcoustics';
 
 export interface RadioStationSpec {
   id: string;
@@ -46,6 +47,9 @@ export class VelocityAudioEngine {
   private currentEngineType: EngineType = 'i4_econobox';
   private isDemonicIceCream = false;
   private escapamentoFurado = false;
+  private acoustics: EngineAcoustics | null = null;
+  private currentSurface: 'asphalt' | 'kerb' | 'grass' | 'gravel' | 'snow' | 'wet' = 'asphalt';
+  private currentWetness = 0;
 
   public init(): void {
     if (this.ctx) {
@@ -145,13 +149,36 @@ export class VelocityAudioEngine {
     this.musicGain.connect(this.bassAnalyser);
     this.bassAnalyser.connect(this.masterGain);
 
+    // Firing-order acoustic model replaces the three-oscillator bank below.
+    // The old bank is kept instantiated (it is referenced by other features)
+    // but its gain stays at zero: two engine sounds layered is worse than one.
+    this.acoustics = new EngineAcoustics(this.ctx, this.masterGain, this.currentEngineType);
+
     this.startRadioSequencer();
+  }
+
+  public setAcousticEnvironment(env: AcousticEnvironment): void {
+    this.acoustics?.setEnvironment(env);
+  }
+
+  public setSurface(surfaceName: string, wetness: number): void {
+    this.currentWetness = wetness;
+    if (wetness > 0.45) {
+      this.currentSurface = 'wet';
+      return;
+    }
+    if (surfaceName.includes('Grama')) this.currentSurface = 'grass';
+    else if (surfaceName.includes('Brita')) this.currentSurface = 'gravel';
+    else if (surfaceName.includes('Neve')) this.currentSurface = 'snow';
+    else if (surfaceName.includes('Zebra') || surfaceName.includes('Kerb')) this.currentSurface = 'kerb';
+    else this.currentSurface = 'asphalt';
   }
 
   public configureCar(car: CarSpec, tune: CarTuneSetup): void {
     this.currentEngineType = tune.engineSwap ?? car.engineType;
     this.isDemonicIceCream = car.name.includes('Sorvete Demoníaco');
     this.escapamentoFurado = tune.exhaustStyle === 'escapamento_furado';
+    this.acoustics?.setEngine(this.currentEngineType);
     if (!this.oscPrimary || !this.oscHarmonic) return;
 
     if (this.currentEngineType === 'ev_quadmotor' || this.currentEngineType === 'rc_brushless') {
@@ -225,9 +252,39 @@ export class VelocityAudioEngine {
     cameraView: CameraView;
     isPaused: boolean;
     engineDamaged: boolean;
+    brake?: number;
+    load?: number;
   }): void {
     if (!this.ctx || !this.engineGain || !this.oscPrimary || !this.oscHarmonic || !this.oscSub) return;
     const now = this.ctx.currentTime;
+
+    // --- Firing-order acoustic model (primary engine voice) ---------------
+    if (this.acoustics) {
+      const rpmNorm = Math.max(0.05, Math.min(1, params.rpm / Math.max(1000, params.maxRpm)));
+      this.acoustics.update({
+        rpm: params.rpm,
+        maxRpm: params.maxRpm,
+        throttle: params.throttle,
+        load: params.load ?? params.throttle * (0.55 + rpmNorm * 0.45),
+        speedKmh: params.speedKmh,
+        slip: params.tireSlip,
+        brake: params.brake ?? 0,
+        wetness: this.currentWetness,
+        surface: this.currentSurface,
+        cockpit: params.cameraView === 'cockpit',
+        paused: params.isPaused || this.isMuted,
+      });
+      // Blow-off detection is still handled here because it depends on boost.
+      if (this.lastThrottle > 0.65 && params.throttle < 0.15 && params.boostPsi > 6) {
+        this.triggerBlowOffAndBackfire();
+      }
+      this.lastThrottle = params.throttle;
+      // Silence the legacy bank explicitly.
+      this.engineGain.gain.setTargetAtTime(0, now, 0.05);
+      if (this.tireNoiseGain) this.tireNoiseGain.gain.setTargetAtTime(0, now, 0.05);
+      if (this.windGain) this.windGain.gain.setTargetAtTime(0, now, 0.05);
+      return;
+    }
 
     if (params.isPaused || this.isMuted) {
       this.engineGain.gain.setTargetAtTime(0, now, 0.06);
@@ -322,6 +379,7 @@ export class VelocityAudioEngine {
   public triggerGearShift(newGear: number): void {
     if (newGear === this.lastGear || !this.ctx || !this.masterGain || this.isMuted) return;
     this.lastGear = newGear;
+    this.acoustics?.triggerShift(newGear);
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
     const g = this.ctx.createGain();
@@ -378,8 +436,12 @@ export class VelocityAudioEngine {
     osc.stop(now + 0.26);
   }
 
-  public triggerDopplerFlyby(): void {
+  public triggerDopplerFlyby(relativeSpeedMs = 30, pan = 0): void {
     if (!this.ctx || !this.masterGain || this.isMuted) return;
+    if (this.acoustics) {
+      this.acoustics.passBy(relativeSpeedMs, pan);
+      return;
+    }
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
     const g = this.ctx.createGain();
