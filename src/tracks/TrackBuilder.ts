@@ -1,5 +1,20 @@
 import * as THREE from 'three';
 import { BiomeTheme, CustomTrackData, GameMode, SavedPoster, TrackSpec } from '../types/game';
+import {
+  buildBuilding,
+  buildDelineator,
+  buildGrassBand,
+  buildGuardrail,
+  buildKmMarker,
+  buildRoadSign,
+  buildRockScatter,
+  buildTerrain,
+  buildTree,
+  buildTreeLineBand,
+  buildUtilityLine,
+  paletteForBiome,
+  TREE_SPECIES,
+} from '../world/Scenery';
 
 export interface DestructibleProp {
   mesh: THREE.Group;
@@ -44,6 +59,17 @@ export interface BuiltTrackWorld {
     lateralOffset: number;
     distance: number;
   };
+}
+
+/** Weighted species pick from the biome's palette. */
+function pickSpecies(palette: ReturnType<typeof paletteForBiome>, rng: () => number): keyof typeof TREE_SPECIES {
+  const total = palette.species.reduce((a, [, w]) => a + w, 0);
+  let r = rng() * total;
+  for (const [key, w] of palette.species) {
+    r -= w;
+    if (r <= 0) return key;
+  }
+  return palette.species[0][0];
 }
 
 function seededRandom(seed: number): () => number {
@@ -223,6 +249,7 @@ export function buildTrackWorld(
   customData?: CustomTrackData | null
 ): BuiltTrackWorld {
   const group = new THREE.Group();
+  let terrainHeightAt: (x: number, z: number) => number = () => -0.35;
   const rng = seededRandom(track.seed + (layoutVariant === 'National' ? 17 : layoutVariant === 'Sprint' ? 53 : 0));
   const roadWidth = customData?.roadWidth ?? (mode === 'drag' ? 18 : mode === 'derby' ? 95 : track.roadWidth);
 
@@ -306,18 +333,18 @@ export function buildTrackWorld(
     rc_supermarket: 0xadb5bd,
   };
 
-  const groundPlane = new THREE.Mesh(
-    new THREE.PlaneGeometry(4200, 4200),
-    new THREE.MeshStandardMaterial({
-      color: groundColors[track.biome] ?? 0x284b28,
-      roughness: track.biome === 'snow_city' || track.biome === 'rc_bathroom' ? 0.25 : 0.9,
-      metalness: track.biome === 'cyber_2099' ? 0.5 : 0.05,
-    })
-  );
-  groundPlane.rotation.x = -Math.PI / 2;
-  groundPlane.position.y = -0.35;
-  groundPlane.receiveShadow = true;
-  group.add(groundPlane);
+  // Terrain: displaced, height-coloured, with real micro-detail. The old build
+  // used a 4.2 km flat plane in one flat colour, which is why the road looked
+  // like it was laid on a table.
+  const biomePalette = paletteForBiome(track.biome);
+  const terrain = buildTerrain(track.biome, 1800, 90, track.seed, mode === 'derby' ? 0.6 : 6.5);
+  group.add(terrain.mesh);
+  terrainHeightAt = terrain.heightAt;
+
+  // Far tree band: a soft painted ring that hides the terrain's edge and gives
+  // the horizon the layered, hazy quality of real vegetation at distance.
+  const bandCentre = new THREE.Vector3(0, 0, 0);
+  group.add(buildTreeLineBand(bandCentre, 760, 46, biomePalette, track.seed + 91));
 
   // 3. Build Ribbon Road Geometry + Red/White (or Green/Yellow Interlagos!) Kerbs
   const roadPositions: number[] = [];
@@ -448,14 +475,8 @@ export function buildTrackWorld(
   const hazards: HazardEntity[] = [];
   const animatedProps: { obj: THREE.Object3D; update: (t: number, dt: number) => void }[] = [];
 
+  const swayingTrees: { sway: (t: number, wind: number) => void; phase: number }[] = [];
   const treeTrunkMat = new THREE.MeshStandardMaterial({ color: 0x5c4033, roughness: 0.9 });
-  const foliageColor =
-    track.biome === 'touge_sakura'
-      ? 0xffafcc
-      : track.biome === 'swiss_alps' || track.biome === 'snow_city'
-      ? 0xd8f3dc
-      : 0x2d6a4f;
-  const foliageMat = new THREE.MeshStandardMaterial({ color: foliageColor, roughness: 0.8 });
 
   const buildingColors = [0x1b263b, 0x240046, 0x0f172a, 0x2b2d42];
   const neonColors = [0x00f5d4, 0xff007f, 0xffbe0b, 0x3a86ff];
@@ -563,14 +584,16 @@ export function buildTrackWorld(
           });
         }
       } else {
-        const tree = new THREE.Group();
-        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.5, 3.5, 7), treeTrunkMat);
-        trunk.position.y = 1.75;
-        const crown = new THREE.Mesh(new THREE.ConeGeometry(2.8, 6.5, 8), foliageMat);
-        crown.position.y = 5.6;
-        tree.add(trunk, crown);
-        tree.position.set(propPos.x, pt.y, propPos.z);
-        group.add(tree);
+        // Real vegetation: a branching trunk with a noise-displaced canopy, in
+        // one of several species weighted by the biome. The old cone-on-a-stick
+        // was the single most "cartoon" object on the whole track.
+        const speciesKey = pickSpecies(biomePalette, rng);
+        const scale = 0.75 + rng() * 0.7;
+        const tree = buildTree(speciesKey, biomePalette, track.seed + i * 13, scale);
+        tree.group.position.set(propPos.x, terrainHeightAt(propPos.x, propPos.z), propPos.z);
+        tree.group.rotation.y = rng() * Math.PI * 2;
+        group.add(tree.group);
+        swayingTrees.push({ sway: tree.sway, phase: rng() * 6.28 });
       }
     }
 
@@ -813,6 +836,109 @@ export function buildTrackWorld(
       active: true,
     });
   }
+
+  // ---------------------------------------------------------------------
+  // ROADSIDE DRESSING — guardrail, grass, posts, signs, rocks
+  // ---------------------------------------------------------------------
+  // The road needs a *corridor*: things that run parallel to it, at real
+  // spacings, so the eye can read speed and scale. Without them the asphalt is a
+  // ribbon floating in a field.
+  const shoulderSides: { points: THREE.Vector3[]; side: THREE.Vector3[] }[] = [];
+  const step = 3;
+  for (const sign of [1, -1]) {
+    const pts: THREE.Vector3[] = [];
+    const sds: THREE.Vector3[] = [];
+    for (let i = 0; i < samplePoints.length; i += step) {
+      const p = samplePoints[i];
+      const t = sampleTangents[i];
+      const right = new THREE.Vector3().crossVectors(t, up).normalize();
+      pts.push(new THREE.Vector3(p.x, p.y, p.z));
+      sds.push(right.multiplyScalar(sign));
+    }
+    shoulderSides.push({ points: pts, side: sds });
+  }
+
+  if (biomePalette.hasGuardrail && mode !== 'derby') {
+    for (const { points, side } of shoulderSides) {
+      const rail = buildGuardrail(points, side, roadWidth * 0.5 + 1.6, 0.58);
+      group.add(rail.group);
+    }
+  }
+
+  if (mode !== 'derby') {
+    for (const { points, side } of shoulderSides) {
+      // Grass tufts in the corridor between the kerb and the tree line.
+      const band = buildGrassBand(
+        points,
+        side,
+        roadWidth * 0.5 + 1.2,
+        biomePalette,
+        track.category === 'rc_revolt' ? 240 : 1500,
+        track.seed + 17,
+        11
+      );
+      group.add(band);
+    }
+    // Loose stones on the shoulder.
+    group.add(
+      buildRockScatter(
+        shoulderSides[0].points,
+        shoulderSides[0].side,
+        track.category === 'rc_revolt' ? 24 : 160,
+        biomePalette,
+        track.seed + 41
+      )
+    );
+  }
+
+  // Delineator posts every ~30 m, alternating sides — the cheapest possible
+  // object, and one of the strongest distance cues when you are doing 200 km/h.
+  if (mode !== 'derby' && track.category !== 'rc_revolt') {
+    const postSpacing = 30;
+    let acc = 0;
+    for (let i = 1; i < samplePoints.length; i++) {
+      acc += samplePoints[i].distanceTo(samplePoints[i - 1]);
+      if (acc < postSpacing) continue;
+      acc = 0;
+      const leftSide = i % 2 === 0;
+      const tan = sampleTangents[i];
+      const right = new THREE.Vector3().crossVectors(tan, up).normalize();
+      const p = samplePoints[i].clone().addScaledVector(right, (leftSide ? 1 : -1) * (roadWidth * 0.5 + 1.0));
+      const post = buildDelineator();
+      post.position.set(p.x, p.y, p.z);
+      post.rotation.y = Math.atan2(tan.x, tan.z);
+      group.add(post);
+    }
+    // A couple of signs near the first corner, and kilometre pegs.
+    const signSpots = [0.18, 0.55, 0.78];
+    for (const f of signSpots) {
+      const idx = Math.floor(f * samplePoints.length) % samplePoints.length;
+      const p = samplePoints[idx];
+      const tan = sampleTangents[idx];
+      const right = new THREE.Vector3().crossVectors(tan, up).normalize();
+      const spot = p.clone().addScaledVector(right, -(roadWidth * 0.5 + 2.4));
+      const sign = buildRoadSign(f < 0.3 ? 'curve' : f < 0.7 ? 'speed' : 'stop', f < 0.3 ? '⟳' : f < 0.7 ? '80' : 'STOP');
+      sign.position.set(spot.x, terrainHeightAt(spot.x, spot.z), spot.z);
+      sign.rotation.y = Math.atan2(tan.x, tan.z) + Math.PI;
+      group.add(sign);
+      const km = buildKmMarker();
+      km.position.set(p.x + right.x * (roadWidth * 0.5 + 1.5), p.y, p.z + right.z * (roadWidth * 0.5 + 1.5));
+      group.add(km);
+    }
+  }
+
+  if (biomePalette.hasPoles && mode !== 'derby') {
+    group.add(buildUtilityLine(shoulderSides[1].points, shoulderSides[1].side, roadWidth * 0.5 + 9, track.seed + 5));
+  }
+
+  // Tree sway drives every crown in the scene from one loop.
+  animatedProps.push({
+    obj: group,
+    update: (t) => {
+      const wind = track.biome === 'sahara_desert' ? 0.9 : 0.45;
+      for (const tr of swayingTrees) tr.sway(t + tr.phase, wind);
+    },
+  });
 
   // Orbital Earth / Jurassic T-Rex Landmarks!
   if (track.biome === 'space_orbital') {
