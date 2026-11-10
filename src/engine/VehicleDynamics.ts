@@ -818,15 +818,29 @@ export class VehicleDynamicsBody {
       const kAlign = (cAlphaFront * halfBase * halfBase + cAlphaRear * halfBase * halfBase) / speedSafe;
       // Beyond the peak, the tyre's own slope makes it negative; the damper must
       // not become a spring that fights the driver, so it is one-sided.
-      const dampCoef = kAlign * 0.3;
+      // The coefficient matters enormously and is easy to get wrong in the
+      // safe-looking direction: at 0.3 the yaw damper removed so much yaw rate
+      // that a road car peaked at 0.63 r/s at 80 km/h while the front tyres were
+      // already at 14 deg of slip - i.e. the tyres were sliding but the body was
+      // refusing to rotate. That reads to a player as heavy, dead understeer
+      // ("o carro não faz a curva"). 0.14 keeps the stability without damping the
+      // corner away; the numbers are in tools/handling.ts.
+      const dampCoef = kAlign * 0.22;
       const dampTorque = -this.angularVelYaw * dampCoef;
       // Integrate the damping implicitly: this term is stiff (a few hundred
       // 1/s at speed) and an explicit step at 240 Hz would ring.
       const yawRateDelta = (yawAccel + dampTorque / izz) * h;
       this.angularVelYaw += yawRateDelta / (1 + (dampCoef / izz) * h);
-      // Yaw rate beyond what the front tyres could ever generate is not a slide,
-      // it is a numerical artefact or a collision impulse. Clamp it.
-      const yawLimit = Math.min(3.2, Math.abs(this.u) / Math.max(0.9, wheelbaseM) * 1.9 + 0.4);
+      // Yaw-rate ceiling.
+      //
+      // The old limit was `speed / wheelbase * 1.9 + 0.4`, which is nearly double
+      // the kinematic limit of a bicycle model. Nothing below it was therefore
+      // ever flagged, and a car could sit at 50 deg of body slip while the clamp
+      // cheerfully allowed it - the "car spins out" report. The ceiling is now
+      // the kinematic limit with a realistic 1.25 allowance for slip angle and a
+      // small floor so low-speed manoeuvring still works.
+      const kinematicLimit = Math.abs(this.u) / Math.max(0.9, wheelbaseM) * Math.tan(0.62);
+      const yawLimit = Math.min(2.6, Math.max(0.5, kinematicLimit * 1.25));
       this.angularVelYaw = THREE.MathUtils.clamp(this.angularVelYaw, -yawLimit, yawLimit);
     }
 

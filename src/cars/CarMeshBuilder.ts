@@ -455,11 +455,23 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
 
   // ---- Shape --------------------------------------------------------------
   const baseShape = shapeForArchetype(car.archetype);
+  /**
+   * Open-wheel cars.
+   *
+   * A Formula car's body is a narrow monocoque, roughly 0.9 m wide, with the
+   * wheels standing outside it on exposed suspension. The shared loft used to be
+   * sized like a saloon (2 m wide) for these archetypes, so the "open wheeler"
+   * came out as a full-width bathtub with the wheels tucked inside its shadow,
+   * which is why it never read as a single-seater no matter what wings were
+   * bolted on. Narrowing the monocoque and pushing the track out is what turns
+   * the silhouette around.
+   */
+  const isOpenWheel = !!baseShape.openWheel;
   const bodykitWiden = tune.bodykit === 'stock' ? 1 : tune.bodykit === 'widebody_rb' ? 1.045 : 1.06;
   const shape: BodyShape = {
     ...baseShape,
     wheelRadius: tireRadiusM,
-    width: baseShape.width * bodykitWiden,
+    width: baseShape.width * bodykitWiden * (isOpenWheel ? 0.5 : 1),
     // Ride height changes are real: the body moves relative to the wheels.
     floor: baseShape.floor + (tune.rideHeightMm / 1000) * 0.55,
     noseTaper: baseShape.noseTaper,
@@ -542,7 +554,11 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   // centreline 42% of the section width inboard of the *maximum* body width,
   // which leaves the tyre proud wherever the body tapers - so the wheels stuck
   // out of the flanks and the car looked like a toy with bolted-on tyres.
-  const trackX = shape.width / 2 - tireWidthM * 0.5 - 0.008;
+  // Open-wheel cars run the tyres outside the bodywork; everything else keeps
+  // the sidewall flush with the arch.
+  const trackX = isOpenWheel
+    ? baseShape.width * 0.5 * 0.86
+    : shape.width / 2 - tireWidthM * 0.5 - 0.008;
   const coords: [number, number, boolean][] = [
     [-trackX, shape.axleFrontZ, true],
     [trackX, shape.axleFrontZ, true],
@@ -620,10 +636,14 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   const beltY = shape.cabin ? shape.cabin.beltY : shape.shoulderY;
   const seatY = shape.floor + 0.06;
 
+  // An open-wheel car has no roof, no B-pillar and no interior trim panel: the
+  // cockpit is a hole in a monocoque, the seat is a moulded shell and the wheel
+  // is detachable. Building the saloon dashboard, carpet and door cards into a
+  // Formula car is what made it read as a bathtub with a wing.
+  //
   // NOTE: the cockpit group is placed at the cabin centre, so every child uses
-  // *body-space* z. The previous build subtracted the cabin centre a second
-  // time on every dash/steering/console part, which pushed the whole dashboard
-  // onto the bonnet and left the interior empty on every car in the catalog.
+  // *body-space* z. The previous build subtracted the cabin centre a second time
+  // on every part, which pushed the dashboard onto the bonnet.
   const cockpitGroup = new THREE.Group();
   cockpitGroup.position.set(0, 0, cabinCentreZ);
   chassisGroup.add(cockpitGroup);
@@ -649,11 +669,36 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     g.position.x = x;
     return g;
   };
-  cockpitGroup.add(buildSeat(-shape.width * 0.22));
-  cockpitGroup.add(buildSeat(shape.width * 0.22));
+  if (isF1) {
+    // Single moulded seat, centred, plus a small racing wheel. The driver sits
+    // reclined in a tub, not at a dashboard.
+    const seat = new THREE.Mesh(roundedSlab(0.4, 0.5, 0.1, 0.05, 8), leatherMat);
+    seat.position.set(0, seatY + 0.16, -0.1);
+    seat.rotation.x = 0.42;
+    const headrestF1 = new THREE.Mesh(roundedSlab(0.32, 0.2, 0.12, 0.05, 8), leatherMat);
+    headrestF1.position.set(0, seatY + 0.36, -0.34);
+    cockpitGroup.add(seat, headrestF1);
+    // The single-seater wheel is added to the cockpit directly; the saloon
+    // steering wheel below is hidden for these cars.
+    // Halo: the safety structure is the most recognisable silhouette element of
+    // a modern single-seater, so it is worth the 200 triangles.
+    const haloMat = new THREE.MeshStandardMaterial({ color: 0x0d0f12, roughness: 0.4, metalness: 0.4 });
+    const haloCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(-0.3, beltY - 0.02, cabinFrontZ - 0.02),
+      new THREE.Vector3(-0.16, beltY + 0.2, cabinFrontZ + 0.1),
+      new THREE.Vector3(0, beltY + 0.26, cabinFrontZ + 0.16),
+      new THREE.Vector3(0.16, beltY + 0.2, cabinFrontZ + 0.1),
+      new THREE.Vector3(0.3, beltY - 0.02, cabinFrontZ - 0.02),
+    ]);
+    cockpitGroup.add(new THREE.Mesh(new THREE.TubeGeometry(haloCurve, 18, 0.028, 8, false), haloMat));
+  } else {
+    cockpitGroup.add(buildSeat(-shape.width * 0.22));
+    cockpitGroup.add(buildSeat(shape.width * 0.22));
+  }
 
   // Dashboard: a full-width slab that curves down at the ends, plus a binnacle.
   const dash = new THREE.Mesh(roundedSlab(shape.width * 0.8, 0.2, 0.34, 0.06, 8), dashMat);
+  if (isF1) dash.visible = false;
   dash.position.set(0, beltY - 0.16, cabinFrontZ - 0.16);
   dash.rotation.x = -0.12;
   cockpitGroup.add(dash);
@@ -723,7 +768,30 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   );
   badge.position.z = -0.029;
   steeringWheelMesh.add(badge);
-  cockpitGroup.add(steeringWheelMesh);
+  if (isF1) {
+    // Purpose-built single-seater wheel: a small flat-rimmed rectangle with two
+    // grips, mounted on a short column, reclined like the seat.
+    const f1Wheel = new THREE.Group();
+    f1Wheel.position.set(0, beltY - 0.1, cabinFrontZ - 0.1);
+    f1Wheel.rotation.x = -0.6;
+    const plate = new THREE.Mesh(
+      roundedSlab(0.2, 0.12, 0.035, 0.02, 6),
+      new THREE.MeshStandardMaterial({ color: 0x0e1013, roughness: 0.5 })
+    );
+    f1Wheel.add(plate);
+    for (const sx of [-1, 1]) {
+      const grip = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.018, 0.018, 0.1, 10),
+        new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.7 })
+      );
+      grip.position.set(sx * 0.095, 0, -0.01);
+      grip.rotation.z = Math.PI / 2;
+      f1Wheel.add(grip);
+    }
+    cockpitGroup.add(f1Wheel);
+  } else {
+    cockpitGroup.add(steeringWheelMesh);
+  }
 
   // Column.
   const column = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.034, 0.22, 12), dashMat);
@@ -746,6 +814,8 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   // Mirror: the inside mirror hangs from the header.
   const rearViewMirror = new THREE.Mesh(roundedSlab(0.24, 0.075, 0.03, 0.014, 6), dashMat);
   rearViewMirror.position.set(0, beltY + 0.34, cabinFrontZ + 0.02);
+  // An open-wheel car has no windscreen header to hang a mirror from.
+  rearViewMirror.visible = !isF1;
   cockpitGroup.add(rearViewMirror);
 
   // ---- Cheirinho de Pinho (kept — it is the game's signature) -------------
