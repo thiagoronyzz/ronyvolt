@@ -1,4 +1,6 @@
-# 🔥 VELOCITY UNCHAINED — THE ULTIMATE RACING EXPERIENCE
+# R-volt
+
+> **Limitações atuais:** não há lobby ou matchmaking online; o modo multiplayer é local com IA. O campeonato e o workshop comunitário são protótipos locais, e o painel companion não sincroniza com outro dispositivo. O progresso da carreira e a economia duram apenas durante a sessão; configurações são salvas no navegador.
 
 **Codinome Interno:** *"O Jogo Que Vai Fazer o Re-Volt Parecer um Flash Game de 2004"*  
 **Motor Proprietário:** **VELOCITY ENGINE v1.0** (WebGL2 / Three.js PBR + Pacejka Magic Formula + Deformação FEA + Web Audio DSP)

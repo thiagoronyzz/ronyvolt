@@ -186,7 +186,7 @@ const SKY_FRAG = /* glsl */ `
   }
 `;
 
-const GRADE_SHADER = {
+export const GRADE_SHADER = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     uResolution: { value: new THREE.Vector2(1, 1) },
@@ -219,6 +219,7 @@ const GRADE_SHADER = {
     uniform float uSaturation;
     uniform float uLift;
     uniform float uPhotoMode;
+    uniform float uSpeedBlur;
     varying vec2 vUv;
 
     float hash(vec2 p) {
@@ -585,11 +586,12 @@ export class RealismRenderer {
       u.uSunIntensity.value = this.skyOverride.sunIntensity;
       u.uCloudiness.value = 0;
       u.uHaze.value = 0.12;
+    } else {
+      u.uSunIntensity.value = 0.35 + day * 0.9;
+      u.uCloudiness.value =
+        input.weather.precipitationIntensity > 0.05 ? Math.min(0.95, 0.35 + input.weather.precipitationIntensity * 0.6) : 0.22;
+      u.uHaze.value = Math.min(0.95, 0.35 + input.weather.visibilityFog * 18);
     }
-    u.uSunIntensity.value = 0.35 + day * 0.9;
-    u.uCloudiness.value =
-      input.weather.precipitationIntensity > 0.05 ? Math.min(0.95, 0.35 + input.weather.precipitationIntensity * 0.6) : 0.22;
-    u.uHaze.value = Math.min(0.95, 0.35 + input.weather.visibilityFog * 18);
 
     // Match fog to the horizon so distant geometry dissolves into the sky
     // instead of into a different colour (a classic compositing tell).

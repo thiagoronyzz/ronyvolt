@@ -73,8 +73,46 @@ export const RaceHud: React.FC<HudProps> = ({
     return `${mins}:${rem}`;
   };
 
+  const touchPedals = (
+      <div className={`hud-pedals${immersiveNoHud ? ' hud-pedals-immersive' : ''}`}>
+        <button
+          onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); onTouchInput({ steer: -1 }); }}
+          onPointerUp={() => onTouchInput({ steer: 0 })}
+          onPointerCancel={() => onTouchInput({ steer: 0 })}
+          style={pedalBtn}
+        >
+          ◀
+        </button>
+        <button
+          onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); onTouchInput({ steer: 1 }); }}
+          onPointerUp={() => onTouchInput({ steer: 0 })}
+          onPointerCancel={() => onTouchInput({ steer: 0 })}
+          style={pedalBtn}
+        >
+          ▶
+        </button>
+        <button
+          onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); onTouchInput({ brake: 1 }); }}
+          onPointerUp={() => onTouchInput({ brake: 0 })}
+          onPointerCancel={() => onTouchInput({ brake: 0 })}
+          style={{ ...pedalBtn, borderColor: '#ef233c' }}
+        >
+          FREIO
+        </button>
+        <button
+          onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); onTouchInput({ throttle: 1 }); }}
+          onPointerUp={() => onTouchInput({ throttle: 0 })}
+          onPointerCancel={() => onTouchInput({ throttle: 0 })}
+          style={{ ...pedalBtn, borderColor: '#06d6a0' }}
+        >
+          ACEL
+        </button>
+      </div>
+  );
+
   if (immersiveNoHud) {
     return (
+      <>
       <button
         onClick={onToggleImmersiveHud}
         style={{
@@ -93,6 +131,8 @@ export const RaceHud: React.FC<HudProps> = ({
       >
         👁️ Mostrar HUD
       </button>
+      {touchPedals}
+      </>
     );
   }
 
@@ -312,37 +352,7 @@ export const RaceHud: React.FC<HudProps> = ({
         </div>
       </div>
 
-      {/* Touch / On-Screen Pedals for Mobile & Tablet */}
-      <div className="hud-pedals">
-        <button
-          onPointerDown={() => onTouchInput({ steer: -1 })}
-          onPointerUp={() => onTouchInput({ steer: 0 })}
-          style={pedalBtn}
-        >
-          ◀
-        </button>
-        <button
-          onPointerDown={() => onTouchInput({ steer: 1 })}
-          onPointerUp={() => onTouchInput({ steer: 0 })}
-          style={pedalBtn}
-        >
-          ▶
-        </button>
-        <button
-          onPointerDown={() => onTouchInput({ brake: 1 })}
-          onPointerUp={() => onTouchInput({ brake: 0 })}
-          style={{ ...pedalBtn, borderColor: '#ef233c' }}
-        >
-          FREIO
-        </button>
-        <button
-          onPointerDown={() => onTouchInput({ throttle: 1 })}
-          onPointerUp={() => onTouchInput({ throttle: 0 })}
-          style={{ ...pedalBtn, borderColor: '#06d6a0' }}
-        >
-          ACEL
-        </button>
-      </div>
+      {touchPedals}
 
       {/* Bottom-Right Digital Tachometer, Gear, Boost & Nitro Cluster */}
       <div className="hud-tacho">

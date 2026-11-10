@@ -31,11 +31,11 @@ export const TrackEditorModal: React.FC<Props> = ({ initialData, onTestTrack, on
   });
 
   return (
-    <div style={wrap}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+    <div className="track-editor mobile-game-panel" style={wrap}>
+      <div className="mobile-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <div>
           <div style={{ fontSize: 11, color: '#06d6a0', fontWeight: 800, letterSpacing: 1.4 }}>
-            SEÇÃO 5.7 — EDITOR DE PISTAS TERRAFORM & WORKSHOP DA COMUNIDADE
+            SEÇÃO 5.7 — EDITOR DE PISTAS · LISTA LOCAL
           </div>
           <h2 style={{ margin: 0, fontSize: 20 }}>Criador de Circuitos 3D com Teste Instantâneo</h2>
         </div>
@@ -61,28 +61,29 @@ export const TrackEditorModal: React.FC<Props> = ({ initialData, onTestTrack, on
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '450px 1fr', gap: 16, flex: 1, minHeight: 0 }}>
+      <div className="track-editor-main" style={{ display: 'grid', gridTemplateColumns: '450px 1fr', gap: 16, flex: 1, minHeight: 0 }}>
         {/* Interactive SVG Spline Canvas */}
         <div style={{ background: '#090f1d', borderRadius: 12, padding: 10, border: '1px solid #1e293b' }}>
           <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>
             ARRASTE OS CHECKPOINTS AZUIS PARA ESCULPIR O TRAÇADO (CLIQUE DUPLO NO FUNDO ADICIONA NOVO PONTO)
           </div>
           <svg
-            width={430}
-            height={380}
-            style={{ background: '#050811', borderRadius: 8, cursor: 'crosshair' }}
+            viewBox="0 0 430 380"
+            width="100%"
+            style={{ display: 'block', maxWidth: 430, height: 'auto', background: '#050811', borderRadius: 8, cursor: 'crosshair', touchAction: 'none' }}
             onPointerMove={(e) => {
               if (draggingIdx === null) return;
               const rect = e.currentTarget.getBoundingClientRect();
-              const coords = fromScreen(e.clientX - rect.left, e.clientY - rect.top);
+              const coords = fromScreen((e.clientX - rect.left) * 430 / rect.width, (e.clientY - rect.top) * 380 / rect.height);
               setPoints((prev) =>
                 prev.map((p, i) => (i === draggingIdx ? { ...p, x: coords.x, z: coords.z } : p))
               );
             }}
             onPointerUp={() => setDraggingIdx(null)}
+            onPointerCancel={() => setDraggingIdx(null)}
             onDoubleClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
-              const coords = fromScreen(e.clientX - rect.left, e.clientY - rect.top);
+              const coords = fromScreen((e.clientX - rect.left) * 430 / rect.width, (e.clientY - rect.top) * 380 / rect.height);
               setPoints((prev) => [...prev, { x: coords.x, y: 0, z: coords.z }]);
             }}
           >
@@ -113,6 +114,7 @@ export const TrackEditorModal: React.FC<Props> = ({ initialData, onTestTrack, on
                       ev.stopPropagation();
                       setSelectedIdx(idx);
                       setDraggingIdx(idx);
+                      ev.currentTarget.setPointerCapture(ev.pointerId);
                     }}
                   />
                   <text x={s.sx + 10} y={s.sy + 4} fill="#cbd5e1" fontSize={10}>
@@ -135,7 +137,7 @@ export const TrackEditorModal: React.FC<Props> = ({ initialData, onTestTrack, on
             />
           </label>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div className="editor-settings-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
             <label style={lbl}>
               Bioma & Biblioteca de Objetos 3D
               <select value={biome} onChange={(e) => setBiome(e.target.value as BiomeTheme)} style={inp}>
@@ -205,13 +207,13 @@ export const TrackEditorModal: React.FC<Props> = ({ initialData, onTestTrack, on
               }}
               style={btnSec}
             >
-              ☁️ Publicar no Workshop Comunitário
+              Adicionar à lista local
             </button>
           </div>
 
           <div style={{ marginTop: 6 }}>
             <div style={{ fontSize: 12, fontWeight: 800, color: '#38bdf8', marginBottom: 6 }}>
-              🌟 FEATURED COMMUNITY TRACKS (VOTAÇÃO ABERTA)
+              LISTA DE EXEMPLO · somente nesta sessão
             </div>
             {communityFeatured.map((cf, i) => (
               <div

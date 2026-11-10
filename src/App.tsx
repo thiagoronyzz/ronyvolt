@@ -5,7 +5,6 @@ import {
   DoorOpen,
   Flag,
   Flame,
-  Gauge,
   Globe,
   Hammer,
   Home,
@@ -22,7 +21,6 @@ import {
   Wallet,
   Wind,
   Wrench,
-  Zap,
 } from 'lucide-react';
 import {
   CameraView,
@@ -83,7 +81,10 @@ const DEFAULT_SETTINGS: GameSettings = {
 function loadSettings(): GameSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return DEFAULT_SETTINGS;
+    if (!raw) {
+      const coarse = window.matchMedia?.('(pointer: coarse)').matches;
+      return coarse ? { ...DEFAULT_SETTINGS, pixelRatioCap: 1 } : DEFAULT_SETTINGS;
+    }
     return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<GameSettings>) };
   } catch {
     return DEFAULT_SETTINGS;
@@ -107,6 +108,7 @@ const DEFAULT_CUSTOM_TRACK: CustomTrackData = {
 export const App: React.FC = () => {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<VelocityEngine | null>(null);
+  const raceConfigRef = useRef<Parameters<VelocityEngine['startRace']>[0] | null>(null);
 
   // Core Game Progression & Economy (100% Ethical — Zero Microtransactions)
   const [credits, setCredits] = useState(65000);
@@ -215,6 +217,8 @@ export const App: React.FC = () => {
     const engine = new VelocityEngine(viewportRef.current, {
       onTelemetry: (frame) => {
         setTelemetryFrame(frame);
+        const currentCamera = engineRef.current?.getCameraView();
+        if (currentCamera) setCameraView(currentCamera);
         // One read per telemetry tick: the map is static geometry plus live
         // points, so there is no reason to re-read it every animation frame.
         setMinimapData(engineRef.current?.getMinimapData() ?? null);
@@ -267,16 +271,6 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Mobile default: a 1x pixel ratio on touch devices. A 3x phone screen at
-  // 2x render scale is 4x the pixels of a desktop window and is the single
-  // biggest cause of "o jogo fica lento no celular". The player can raise it in
-  // Settings → Gráficos.
-  useEffect(() => {
-    const coarse = window.matchMedia?.('(pointer: coarse)').matches;
-    if (!coarse) return;
-    setSettings((s0) => (s0.pixelRatioCap === 2 ? { ...s0, pixelRatioCap: 1 } : s0));
-  }, []);
-
   useEffect(() => {
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -284,6 +278,7 @@ export const App: React.FC = () => {
       // storage unavailable — settings still apply for the session
     }
     audioEngine.setMuted(settings.muted);
+    audioEngine.setMasterVolume(settings.masterVolume);
     audioEngine.setEngineVolume(settings.engineVolume);
     audioEngine.setSfxVolume(settings.sfxVolume);
     audioEngine.setMusicVolume(settings.musicVolume);
@@ -313,6 +308,12 @@ export const App: React.FC = () => {
     }
   }, [selectedCar, activeTune, garageTier, trophyCount, posters, inRace]);
 
+  // A showroom rebuild replaces the lights and car rig; restore the controls
+  // to the new objects instead of leaving the UI and scene out of sync.
+  useEffect(() => {
+    if (!inRace) engineRef.current?.setGarageInteractiveState({ doorsOpen, hoodOpen, trunkOpen, cfdVisible, spotIntensity });
+  }, [inRace, selectedCar, activeTune, garageTier, trophyCount, posters, doorsOpen, hoodOpen, trunkOpen, cfdVisible, spotIntensity]);
+
   const handleSelectCar = (car: CarSpec) => {
     setSelectedCar(car);
     if (!tunesByCar[car.id]) {
@@ -335,15 +336,14 @@ export const App: React.FC = () => {
     const lp = override?.laps ?? laps;
     const w = WEATHER_PRESETS.find((x) => x.id === tr.defaultWeatherId) ?? selectedWeather;
 
-    setActiveModal('none');
-    setRaceResult(null);
-    setSheepDisqualified(false);
-    setRadioFeed([]);
-    setPhotoMode(false);
-    setPaused(false);
-    setInRace(true);
+    if (override?.track) {
+      setSelectedTrack(tr);
+      setSelectedWeather(w);
+    }
+    if (override?.mode) setSelectedMode(md);
+    if (override?.laps !== undefined) setLaps(lp);
 
-    engineRef.current.startRace({
+    startRaceSession({
       car: selectedCar,
       tune: activeTune,
       track: tr,
@@ -360,6 +360,27 @@ export const App: React.FC = () => {
       layoutVariant,
       customTrack: override?.custom !== undefined ? override.custom : customTrack,
     });
+  };
+
+  const startRaceSession = (config: Parameters<VelocityEngine['startRace']>[0]) => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    raceConfigRef.current = config;
+    setActiveModal('none');
+    setRaceResult(null);
+    setSheepDisqualified(false);
+    setRadioFeed([]);
+    setTelemetryFrame(null);
+    setMinimapData(null);
+    setPhotoMode(false);
+    setPaused(false);
+    setInRace(true);
+    engine.startRace(config);
+    setCameraView(engine.getCameraView());
+  };
+
+  const restartRaceSession = () => {
+    if (raceConfigRef.current) startRaceSession(raceConfigRef.current);
   };
 
   const returnToGarage = () => {
@@ -429,300 +450,66 @@ export const App: React.FC = () => {
         />
       )}
 
-      {/* ===================== 3D GARAGE SHOWROOM UI ===================== */}
+      {/* Garage navigation leaves the car and studio visible. */}
       {!inRace && (
-        <>
-          {/* Top Producer Manifesto Header Bar */}
-          <div
-            style={{
-              position: 'fixed',
-              top: 0,
-              left: 0,
-              right: 0,
-              height: 52,
-              background: 'linear-gradient(90deg, rgba(6,9,18,0.94), rgba(16,22,38,0.88))',
-              borderBottom: '1px solid rgba(255,149,0,0.3)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              padding: '0 18px',
-              zIndex: 30,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <span
-                style={{
-                  background: 'linear-gradient(90deg, #ff3b30, #ff9500)',
-                  padding: '5px 9px',
-                  borderRadius: 6,
-                  fontWeight: 900,
-                  fontSize: 12,
-                  letterSpacing: 1,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 5,
-                }}
-              >
-                <Zap size={13} /> VELOCITY ENGINE
-              </span>
-              <div>
-                <div style={{ fontWeight: 900, fontSize: 15, letterSpacing: 0.8 }}>
-                  VELOCITY UNCHAINED{' '}
-                  <span style={{ fontSize: 11, color: '#ffbe0b', fontWeight: 700 }}>
-                    • {CAR_CATALOG.length} Carros • {TRACK_CATALOG.length} Pistas • 47 Climas • 14 Modos
-                  </span>
+        <div className="garage-ui">
+          <header className="garage-header">
+            <div className="garage-brand">R<span>-</span>volt <small>RACING</small></div>
+            <div className="garage-header-actions">
+              <span className="garage-balance"><Wallet size={15} /> V$ {credits.toLocaleString('pt-BR')}</span>
+              <button className="garage-icon" onClick={() => setSettings((s) => ({ ...s, muted: !s.muted }))} aria-label={muted ? 'Ativar áudio' : 'Silenciar áudio'} title={muted ? 'Ativar áudio' : 'Silenciar áudio'}>
+                {muted ? <VolumeX size={17} /> : <Volume2 size={17} />}
+              </button>
+              <button className="garage-icon" onClick={() => setShowSettings(true)} aria-label="Configurações" title="Configurações"><Settings size={17} /></button>
+            </div>
+          </header>
+
+          <section className="garage-car-card" aria-label="Carro selecionado">
+            <div className="garage-eyebrow">SUA GARAGEM <span> / </span> CARRO ATUAL</div>
+            <h1>{selectedCar.name}</h1>
+            <p>{selectedCar.brand} · {selectedCar.year} · {selectedCar.drivetrain}</p>
+            <div className="garage-stats">
+              <div><span>POTÊNCIA</span><strong>{selectedCar.horsepower} <small>cv</small></strong></div>
+              <div><span>0–100 KM/H</span><strong>{selectedCar.zeroToHundredSec} <small>s</small></strong></div>
+              <div><span>MÁXIMA</span><strong>{selectedCar.topSpeedKmh} <small>km/h</small></strong></div>
+            </div>
+            <button className="garage-text-button" onClick={() => setActiveModal('cars')}>Trocar de carro <span>→</span></button>
+            <details className="garage-details">
+              <summary>Inspecionar carro</summary>
+              <div className="garage-inspection">
+                <button onClick={() => { const next = !doorsOpen; setDoorsOpen(next); engineRef.current?.setGarageInteractiveState({ doorsOpen: next }); }}><DoorOpen size={14} /> {doorsOpen ? 'Fechar portas' : 'Abrir portas'}</button>
+                <button onClick={() => { const next = !hoodOpen; setHoodOpen(next); engineRef.current?.setGarageInteractiveState({ hoodOpen: next }); }}><Wrench size={14} /> {hoodOpen ? 'Fechar capô' : 'Abrir capô'}</button>
+                <button onClick={() => { const next = !trunkOpen; setTrunkOpen(next); engineRef.current?.setGarageInteractiveState({ trunkOpen: next }); }}><Speaker size={14} /> {trunkOpen ? 'Fechar mala' : 'Abrir mala'}</button>
+                <button onClick={() => engineRef.current?.revEngineInGarage()}><Flame size={14} /> Acelerar motor</button>
+                <button onClick={() => { const next = !cfdVisible; setCfdVisible(next); engineRef.current?.setGarageInteractiveState({ cfdVisible: next }); }}><Wind size={14} /> {cfdVisible ? 'Desligar CFD' : 'Fluxo CFD'}</button>
+                <label>Iluminação: {spotIntensity}W<input type="range" min={8} max={95} value={spotIntensity} onChange={(e) => { const v = Number(e.target.value); setSpotIntensity(v); engineRef.current?.setGarageInteractiveState({ spotIntensity: v }); }} /></label>
+                <label>Garagem<select value={garageTier} onChange={(e) => setGarageTier(Number(e.target.value) as 1 | 2 | 3)}><option value={1}>Galpão</option><option value={2}>Oficina Pro</option><option value={3}>Showroom Mônaco</option></select></label>
+              </div>
+            </details>
+          </section>
+
+          <div className="garage-hint">ARRASTE PARA GIRAR <span>·</span> ROLE PARA APROXIMAR</div>
+          <nav className="garage-nav" aria-label="Menu principal">
+            <div className="garage-nav-links">
+              <button onClick={() => setActiveModal('cars')}><Car size={17} /> Carros</button>
+              <button onClick={() => setActiveModal('tuning')}><Wrench size={17} /> Preparação</button>
+              <button onClick={() => setActiveModal('tracks')}><Globe size={17} /> Pistas</button>
+              <button onClick={() => setActiveModal('career')}><Clapperboard size={17} /> Carreira</button>
+              <details className="garage-more">
+                <summary>Mais <span>⌃</span></summary>
+                <div className="garage-more-menu">
+                  <button onClick={() => setActiveModal('editor')}><Hammer size={16} /> Editor de pistas</button>
+                  <button onClick={() => setActiveModal('soundtrack')}><Music2 size={16} /> Música</button>
+                  <button onClick={() => setActiveModal('companion')}><Smartphone size={16} /> Companion</button>
                 </div>
-              </div>
+              </details>
             </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
-              <span style={{ color: '#06d6a0', fontWeight: 900, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                <Wallet size={14} /> V$ {credits.toLocaleString('pt-BR')}
-              </span>
-              <span style={{ color: '#ffbe0b', fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                <Trophy size={14} /> {trophyCount} Troféus
-              </span>
-              <button onClick={() => setShowSettings(true)} style={topChip} title="Configurações">
-                <Settings size={13} style={{ verticalAlign: -2 }} /> Ajustes
-              </button>
-
-              <select
-                value={garageTier}
-                onChange={(e) => setGarageTier(Number(e.target.value) as 1 | 2 | 3)}
-                style={topChip}
-                title="Evolução da Garagem 3D"
-              >
-                <option value={1}>Garagem 1 — Galpão</option>
-                <option value={2}>Garagem 2 — Oficina Pro</option>
-                <option value={3}>Garagem 3 — Showroom Mônaco</option>
-              </select>
-
-              <button
-                onClick={() => setSettings((s0) => ({ ...s0, muted: !s0.muted }))}
-                style={{ ...topChip, display: 'inline-flex', alignItems: 'center', gap: 6 }}
-                title="Silenciar / ativar áudio"
-              >
-                {muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
-                {muted ? 'Mudo' : 'Áudio 3D'}
-              </button>
+            <div className="garage-race">
+              <div><span>PRÓXIMA CORRIDA</span><strong>{selectedTrack.name.split('—')[0].trim()}</strong></div>
+              <button className="garage-start" onClick={() => launchRaceSession({ custom: null })}><Play size={16} fill="currentColor" /> CORRER</button>
             </div>
-          </div>
-
-          {/* Left Showroom Car Spec & Quick Legend Switcher */}
-          <div
-            style={{
-              position: 'fixed',
-              top: 66,
-              left: 18,
-              width: 'min(365px, 92vw)',
-              background: 'rgba(8, 12, 24, 0.84)',
-              backdropFilter: 'blur(12px)',
-              border: '1px solid rgba(255,255,255,0.13)',
-              borderRadius: 14,
-              padding: 14,
-              zIndex: 25,
-            }}
-          >
-            <div style={{ fontSize: 10, color: '#ff9500', fontWeight: 800, letterSpacing: 1.3 }}>
-              NA PLATAFORMA ROTATIVA 3D (ARRASTE E DÊ ZOOM!)
-            </div>
-            <h2 style={{ fontSize: 19, margin: '3px 0 4px' }}>{selectedCar.name}</h2>
-            <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8 }}>
-              {selectedCar.brand} ({selectedCar.year}) • {selectedCar.country} • Tração {selectedCar.drivetrain}
-            </div>
-
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 10 }}>
-              <div style={statCard}>
-                <span style={{ fontSize: 10, color: '#94a3b8' }}>POTÊNCIA</span>
-                <strong style={{ fontSize: 15, color: '#ffbe0b' }}>{selectedCar.horsepower} cv</strong>
-              </div>
-              <div style={statCard}>
-                <span style={{ fontSize: 10, color: '#94a3b8' }}>0–100 KM/H</span>
-                <strong style={{ fontSize: 15, color: '#00f5d4' }}>{selectedCar.zeroToHundredSec}s</strong>
-              </div>
-              <div style={statCard}>
-                <span style={{ fontSize: 10, color: '#94a3b8' }}>MÁXIMA</span>
-                <strong style={{ fontSize: 15 }}>{selectedCar.topSpeedKmh} km/h</strong>
-              </div>
-            </div>
-
-            {/* Interactive 3D Inspection Buttons */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginBottom: 10 }}>
-              <button
-                onClick={() => {
-                  const next = !doorsOpen;
-                  setDoorsOpen(next);
-                  engineRef.current?.setGarageInteractiveState({ doorsOpen: next });
-                }}
-                style={inspectBtn}
-              >
-                <DoorOpen size={13} /> {doorsOpen ? 'Fechar portas' : 'Abrir portas'}
-              </button>
-              <button
-                onClick={() => {
-                  const next = !hoodOpen;
-                  setHoodOpen(next);
-                  engineRef.current?.setGarageInteractiveState({ hoodOpen: next });
-                }}
-                style={inspectBtn}
-              >
-                <Wrench size={13} /> {hoodOpen ? 'Fechar capô' : 'Ver motor 3D'}
-              </button>
-              <button
-                onClick={() => {
-                  const next = !trunkOpen;
-                  setTrunkOpen(next);
-                  engineRef.current?.setGarageInteractiveState({ trunkOpen: next });
-                }}
-                style={inspectBtn}
-              >
-                <Speaker size={13} /> {trunkOpen ? 'Fechar mala' : 'Ver som'}
-              </button>
-              <button
-                onClick={() => engineRef.current?.revEngineInGarage()}
-                style={{ ...inspectBtn, borderColor: '#ff3b30', color: '#ff9500' }}
-              >
-                <Flame size={13} /> Ligar & cortar giro
-              </button>
-              <button
-                onClick={() => {
-                  const next = !cfdVisible;
-                  setCfdVisible(next);
-                  engineRef.current?.setGarageInteractiveState({ cfdVisible: next });
-                }}
-                style={{ ...inspectBtn, borderColor: '#00f5d4', color: '#00f5d4' }}
-              >
-                <Wind size={13} /> {cfdVisible ? 'CFD ativo' : 'Fluxo CFD'}
-              </button>
-            </div>
-
-            <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 8 }}>
-              Refletores do showroom: {spotIntensity}W
-              <input
-                type="range"
-                min={8}
-                max={95}
-                value={spotIntensity}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  setSpotIntensity(v);
-                  engineRef.current?.setGarageInteractiveState({ spotIntensity: v });
-                }}
-                style={{ width: '100%' }}
-              />
-            </label>
-
-            {/* Quick Iconic Showcase Presets */}
-            <div style={{ fontSize: 10, color: '#38bdf8', fontWeight: 800, marginBottom: 5 }}>
-ATALHOS DE DESTAQUE
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-              {[
-                ['fiat-uno-2005-raiz', 'Uno 2005 s/ Ar'],
-                ['orig-solis-tupa-x1', 'Solis-Tupã MG'],
-                ['mercedes-300sl-gullwing', '300SL Gullwing'],
-                ['mclaren-mp4-4-senna', 'Senna MP4/4'],
-                ['revolt-toyeca-pro', 'Toyeca Re-Volt'],
-                ['bugatti-chiron-300', 'Chiron 300+'],
-              ].map(([cid, label]) => {
-                const found = CAR_CATALOG.find((c) => c.id === cid);
-                if (!found) return null;
-                return (
-                  <button
-                    key={cid}
-                    onClick={() => handleSelectCar(found)}
-                    style={{
-                      ...inspectBtn,
-                      background: selectedCar.id === cid ? 'rgba(255,149,0,0.28)' : 'rgba(255,255,255,0.06)',
-                    }}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Bottom Main Navigation Dock & Giant START Button */}
-          <div
-            style={{
-              position: 'fixed',
-              bottom: 18,
-              left: '50%',
-              transform: 'translateX(-50%)',
-              display: 'flex',
-              gap: 8,
-              alignItems: 'center',
-              background: 'rgba(7, 11, 22, 0.92)',
-              backdropFilter: 'blur(14px)',
-              padding: '10px 14px',
-              borderRadius: 16,
-              border: '1px solid rgba(255,255,255,0.16)',
-              zIndex: 30,
-              flexWrap: 'wrap',
-              justifyContent: 'center',
-              width: 'max-content',
-              maxWidth: '96vw',
-            }}
-          >
-            <button onClick={() => setActiveModal('cars')} style={dockBtn}>
-              <Car size={15} /> {CAR_CATALOG.length} Carros & Puzzles
-            </button>
-            <button onClick={() => setActiveModal('tuning')} style={dockBtn}>
-              <Wrench size={15} /> Customização & CFD
-            </button>
-            <button onClick={() => setActiveModal('tracks')} style={dockBtn}>
-              <Globe size={15} /> {TRACK_CATALOG.length} Pistas & 47 Climas
-            </button>
-            <button onClick={() => setActiveModal('career')} style={dockBtn}>
-              <Clapperboard size={15} /> Carreira & 200 Bots
-            </button>
-            <button onClick={() => setActiveModal('editor')} style={dockBtn}>
-              <Hammer size={15} /> Editor de Pistas
-            </button>
-            <button onClick={() => setActiveModal('soundtrack')} style={dockBtn}>
-              <Music2 size={15} /> Playlist da Viagem
-            </button>
-            <button onClick={() => setActiveModal('companion')} style={dockBtn}>
-              <Smartphone size={15} /> Companion App
-            </button>
-
-            <button
-              onClick={() => {
-                const rcGarden = TRACK_CATALOG.find((t) => t.id === 'rc-garden-cat')!;
-                const toyeca = CAR_CATALOG.find((c) => c.id === 'revolt-toyeca-pro')!;
-                handleSelectCar(toyeca);
-                setSelectedTrack(rcGarden);
-                setSelectedMode('revolt_legacy');
-                setTimeout(() => launchRaceSession({ track: rcGarden, mode: 'revolt_legacy', laps: 3 }), 30);
-              }}
-              style={{
-                ...dockBtn,
-                background: 'rgba(114, 9, 183, 0.45)',
-                borderColor: '#b5179e',
-              }}
-            >
-              🐱 Modo Re-Volt + O GATO!
-            </button>
-
-            <button
-              onClick={() => launchRaceSession({ custom: null })}
-              style={{
-                padding: '12px 24px',
-                borderRadius: 11,
-                border: 'none',
-                background: 'linear-gradient(90deg, #ff3b30, #ff9500)',
-                color: '#fff',
-                fontWeight: 900,
-                fontSize: 14,
-                cursor: 'pointer',
-                boxShadow: '0 0 26px rgba(255, 59, 48, 0.55)',
-              }}
-            >
-              <Play size={16} /> START — CORRER EM {selectedTrack.name.split('—')[0].trim().toUpperCase()}!
-            </button>
-          </div>
-        </>
+          </nav>
+        </div>
       )}
 
       {/* ===================== GARAGE / GLOBAL MODALS ===================== */}
@@ -885,7 +672,10 @@ ATALHOS DE DESTAQUE
               exposure: photoExposure,
             });
           }}
-          onToggleImmersiveHud={() => setImmersiveNoHud((v) => !v)}
+          onToggleImmersiveHud={() => {
+            engineRef.current?.setTouchInput({ throttle: 0, brake: 0, steer: 0 });
+            setImmersiveNoHud((v) => !v);
+          }}
           onTogglePsxRetro={() => {
             const next = !psxRetro;
             setPsxRetro(next);
@@ -903,7 +693,7 @@ ATALHOS DE DESTAQUE
       {inRace && paused && !photoMode && !raceResult && !sheepDisqualified && (
         <PauseMenu
           onResume={() => engineRef.current?.setPaused(false)}
-          onRestart={() => launchRaceSession()}
+          onRestart={restartRaceSession}
           onQuit={returnToGarage}
         />
       )}
@@ -995,7 +785,7 @@ ATALHOS DE DESTAQUE
               Você encostou em uma ovelha nas Terras Altas da Escócia! Conforme a cláusula inegociável da Seção 3.1-C do Produtor, o VELOCITY ENGINE recusa-se terminantemente a continuar qualquer corrida onde a fauna local não seja respeitada.
             </p>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
-              <button onClick={() => launchRaceSession()} style={dockBtn}>
+              <button onClick={restartRaceSession} style={dockBtn}>
                 <RotateCcw size={15} /> Tentar novamente desviando
               </button>
               <button onClick={returnToGarage} style={dockBtn}>
@@ -1038,7 +828,7 @@ ATALHOS DE DESTAQUE
               {raceResult.stuntScore > 0 && <div>Estilo Acrobacias: {raceResult.stuntScore.toLocaleString('pt-BR')} pts</div>}
             </div>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
-              <button onClick={() => launchRaceSession()} style={dockBtn}>
+              <button onClick={restartRaceSession} style={dockBtn}>
                 <RotateCcw size={15} /> Correr revanche
               </button>
               <button
@@ -1060,42 +850,6 @@ ATALHOS DE DESTAQUE
       <div style={{ display: 'none' }}>{RADIO_STATIONS.length}</div>
     </div>
   );
-};
-
-const topChip: React.CSSProperties = {
-  background: 'rgba(255,255,255,0.08)',
-  border: '1px solid rgba(255,255,255,0.18)',
-  color: '#fff',
-  padding: '5px 9px',
-  borderRadius: 7,
-  fontSize: 11,
-  fontWeight: 700,
-  cursor: 'pointer',
-  fontFamily: 'inherit',
-};
-
-const statCard: React.CSSProperties = {
-  background: 'rgba(255,255,255,0.05)',
-  borderRadius: 8,
-  padding: '6px 8px',
-  display: 'flex',
-  flexDirection: 'column',
-};
-
-const inspectBtn: React.CSSProperties = {
-  background: 'rgba(255,255,255,0.07)',
-  border: '1px solid rgba(255,255,255,0.18)',
-  color: '#f8fafc',
-  padding: '6px 10px',
-  borderRadius: 8,
-  fontSize: 11,
-  fontWeight: 700,
-  cursor: 'pointer',
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 6,
-  fontFamily: 'inherit',
-  transition: 'background 140ms ease, border-color 140ms ease',
 };
 
 const dockBtn: React.CSSProperties = {

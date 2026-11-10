@@ -85,7 +85,7 @@ export class VelocityAudioEngine {
 
     this.ctx = new AudioCtx();
     this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = 0.42;
+    this.masterGain.gain.value = this.isMuted || this.menuPaused ? 0 : 0.42 * this.masterVolume;
     this.masterGain.connect(this.ctx.destination);
 
     // Cabin / Environment filter
@@ -209,7 +209,8 @@ export class VelocityAudioEngine {
     // Imported MP3s: own gain (own volume), tapped into the same analyser so
     // the subwoofer chassis-shake easter egg reacts to the player's music too.
     this.customGain = this.ctx.createGain();
-    this.customGain.gain.value = this.customVolume;
+    // The player already controls its own gain; keep this routing bus at unity.
+    this.customGain.gain.value = 1;
     this.customGain.connect(this.bassAnalyser);
     customMusicPlayer.attach(this.ctx, this.customGain);
     customMusicPlayer.setVolume(this.customVolume);
@@ -512,10 +513,6 @@ export class VelocityAudioEngine {
 
   public setMusicVolume(v: number): void {
     soundtrackPlayer.setVolume(v);
-    if (this.musicGain && this.ctx) {
-      // The old sequencer shared this bus; keep it audible but proportional.
-      this.musicGain.gain.setTargetAtTime(0.25 * Math.max(0.3, v), this.ctx.currentTime, 0.1);
-    }
   }
 
   public getMusicVolume(): number {
@@ -903,13 +900,14 @@ export class VelocityAudioEngine {
   }
 
   private playSynthNote(freq: number, dur: number, type: OscillatorType, vol: number): void {
-    if (!this.ctx || !this.musicGain) return;
+    const level = soundtrackPlayer.getVolume();
+    if (!this.ctx || !this.musicGain || level <= 0) return;
     const now = this.ctx.currentTime;
     const osc = this.ctx.createOscillator();
     const g = this.ctx.createGain();
     osc.type = type;
     osc.frequency.setValueAtTime(freq, now);
-    g.gain.setValueAtTime(vol, now);
+    g.gain.setValueAtTime(vol * level, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + dur);
     osc.connect(g).connect(this.musicGain);
     osc.start(now);

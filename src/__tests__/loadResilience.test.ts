@@ -36,7 +36,7 @@ describe('memory / GPU resource discipline', () => {
   });
 
   it('removes every global listener it installs', () => {
-    for (const listener of ['keydown', 'resize', 'orientationchange', 'blur', 'visibilitychange']) {
+    for (const listener of ['keydown', 'keyup', 'resize', 'orientationchange', 'blur', 'visibilitychange', 'pointerup', 'pointermove', 'pointerdown', 'wheel']) {
       const added = engine.includes(`addEventListener('${listener}'`);
       const removed = engine.includes(`removeEventListener('${listener}'`);
       if (added) expect(removed, `listener ${listener} must be removed`).toBe(true);

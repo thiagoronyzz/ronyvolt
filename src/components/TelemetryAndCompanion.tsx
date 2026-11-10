@@ -144,6 +144,7 @@ export const CompanionAppModal: React.FC<CompanionProps> = ({
 
   return (
     <div
+      className="companion-panel"
       style={{
         position: 'fixed',
         top: 58,
@@ -165,9 +166,9 @@ export const CompanionAppModal: React.FC<CompanionProps> = ({
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
           <div>
             <div style={{ fontSize: 10, color: '#38bdf8', fontWeight: 800 }}>
-              📱 VELOCITY COMPANION APP (iOS / ANDROID SYNC)
+              R-VOLT · PAINEL LOCAL
             </div>
-            <strong style={{ fontSize: 16 }}>Segundo Monitor & Pit Wall</strong>
+            <strong style={{ fontSize: 16 }}>Painel de corrida</strong>
           </div>
           <button onClick={onClose} style={miniBtn}>
             FECHAR
@@ -190,7 +191,7 @@ export const CompanionAppModal: React.FC<CompanionProps> = ({
 
         {/* Live Second Screen Telemetry */}
         <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: 12, padding: 10, marginBottom: 12, fontSize: 12 }}>
-          <div style={{ color: '#94a3b8', fontSize: 10 }}>VEÍCULO SINCRONIZADO</div>
+          <div style={{ color: '#94a3b8', fontSize: 10 }}>VEÍCULO ATUAL</div>
           <div style={{ fontWeight: 800, marginBottom: 6 }}>{carName}</div>
           {frame ? (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>

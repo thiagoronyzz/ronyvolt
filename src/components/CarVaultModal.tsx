@@ -48,7 +48,7 @@ export const CarVaultModal: React.FC<Props> = ({
   }, [cat, query]);
 
   return (
-    <div style={modalWrap}>
+    <div className="car-vault mobile-game-panel" style={modalWrap}>
       <div style={headerRow}>
         <div>
           <div style={{ fontSize: 11, color: '#ff9500', fontWeight: 800, letterSpacing: 1.5 }}>
@@ -107,7 +107,7 @@ export const CarVaultModal: React.FC<Props> = ({
         })}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 10, marginBottom: 10 }}>
+      <div className="car-vault-search" style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: 10, marginBottom: 10 }}>
         <input
           type="text"
           placeholder="Pesquisar entre 888 carros (ex: Uno 2005, Senna, Gullwing, Chiron, GT3 RS, Sofá, Toyeca...)"

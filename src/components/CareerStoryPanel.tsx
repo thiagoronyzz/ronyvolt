@@ -40,13 +40,14 @@ export const CareerStoryPanel: React.FC<Props> = ({
   );
 
   return (
-    <div style={wrap}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+    <div className="career-panel mobile-game-panel" style={wrap}>
+      <div className="mobile-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
         <div>
           <div style={{ fontSize: 11, color: '#ffbe0b', fontWeight: 800, letterSpacing: 1.5 }}>
             SEÇÕES 4, 5.1 & 12 — MODO HISTÓRIA (25 CAPÍTULOS) & 200 PILOTOS DE IA PSICOLÓGICA
           </div>
           <h2 style={{ margin: 0, fontSize: 20 }}>Carreira Cinematográfica: Do Galpão com Uno ao Pódio de Mônaco</h2>
+          <p style={{ color: '#aab4bf', fontSize: 11, marginTop: 4 }}>O progresso da carreira dura apenas enquanto a página estiver aberta.</p>
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>
@@ -69,9 +70,9 @@ export const CareerStoryPanel: React.FC<Props> = ({
       </div>
 
       {view === 'chapters' ? (
-        <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+        <div className="career-panel-main" style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 14, flex: 1, minHeight: 0 }}>
           {/* Chapter List */}
-          <div style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, paddingRight: 4 }}>
+          <div className="career-chapter-list" style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, paddingRight: 4 }}>
             {CAREER_CHAPTERS.map((ch) => {
               const done = completedChapters.has(ch.chapterNumber);
               const sel = activeChap.chapterNumber === ch.chapterNumber;

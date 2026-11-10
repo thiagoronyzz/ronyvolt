@@ -244,12 +244,26 @@ function createAsphaltDetailMaps(): { normalMap: THREE.CanvasTexture; roughnessM
 }
 
 
+/** Custom circuits provide their own identity and environment, independent of
+ * whichever catalogue track was selected before opening the editor. */
+export function resolveTrackForWorld(track: TrackSpec, customData?: CustomTrackData | null): TrackSpec {
+  if (!customData) return track;
+  return {
+    ...track,
+    name: customData.name,
+    biome: customData.biome,
+    roadWidth: customData.roadWidth,
+    gravityG: customData.biome === 'mars_colony' ? 0.38 : 1,
+  };
+}
+
 export function buildTrackWorld(
   track: TrackSpec,
   mode: GameMode,
   layoutVariant: 'GP' | 'National' | 'Sprint' = 'GP',
   customData?: CustomTrackData | null
 ): BuiltTrackWorld {
+  track = resolveTrackForWorld(track, customData);
   const group = new THREE.Group();
   let terrainHeightAt: (x: number, z: number) => number = () => -0.35;
   const rng = seededRandom(track.seed + (layoutVariant === 'National' ? 17 : layoutVariant === 'Sprint' ? 53 : 0));
