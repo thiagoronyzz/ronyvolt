@@ -126,6 +126,8 @@ export class VelocityEngine {
   private currentMode: GameMode = 'quick_race';
   private totalLaps = 3;
   private hourOfDay = 14.5;
+  /** Latitude for the solar altitude curve, set from the venue country. */
+  private sunLatitudeDeg = 23.5;
   private dynamicTimeSpeed = 0.04; // hours per real second
   private assistMode: AssistMode = 'pro';
   private damageEnabled = true;
@@ -471,6 +473,7 @@ export class VelocityEngine {
 
     this.realism.setSkyOverride(null);
     this.realism.setFogOverride(null);
+    this.sunLatitudeDeg = latitudeForCountry(config.track.country);
     this.currentCar = config.car;
     this.currentTune = config.tune;
     this.currentTrack = config.track;
@@ -718,11 +721,27 @@ export class VelocityEngine {
     if (!this.currentWeather) return;
     this.hourOfDay = (this.hourOfDay + dt * this.dynamicTimeSpeed) % 24;
 
-    // Solar elevation curve: sunrise ~6h, zenith 12h, sunset ~18h
-    const sunAngle = ((this.hourOfDay - 6) / 24) * Math.PI * 2;
-    const sunElev = Math.sin(sunAngle);
-    const dayFactor = THREE.MathUtils.clamp((sunElev + 0.18) / 0.55, 0.04, 1.0);
-    const isGoldenHour = Math.abs(sunElev) < 0.26;
+    // Solar geometry. A single mechanical series (elevation = sin of the hour
+    // angle) is what the old build used, and it has two consequences a
+    // photograph would never show: the sun races through twilight in minutes,
+    // and it rises due east forever.
+    //   - Elevation is now a latitude-derived altitude curve, and the golden
+    //     window is where the *sun* is low (not where noon is far away).
+    //   - Azimuth swings from north-east at dawn through south at noon to
+    //     north-west at dusk, on the northern-hemisphere convention.
+    const hourAngle = ((this.hourOfDay - 12) / 24) * Math.PI * 2;
+    const latRad = THREE.MathUtils.degToRad(this.sunLatitudeDeg ?? 23);
+    const decl = THREE.MathUtils.degToRad(6);
+    const sinElev =
+      Math.sin(latRad) * Math.sin(decl) + Math.cos(latRad) * Math.cos(decl) * Math.cos(hourAngle);
+    const sunElev = sinElev;
+    const azimuth = Math.atan2(
+      Math.sin(hourAngle),
+      Math.cos(hourAngle) * Math.sin(latRad) - Math.tan(decl) * Math.cos(latRad)
+    );
+    const horizonElev = Math.cos(azimuth) * Math.cos(sunElev);
+    const dayFactor = THREE.MathUtils.clamp((sunElev + 0.16) / 0.5, 0.04, 1.0);
+    const isGoldenHour = sunElev > -0.02 && sunElev < 0.3;
 
     const topBase = new THREE.Color(this.currentWeather.skyTopHex);
     const horBase = new THREE.Color(this.currentWeather.skyHorizonHex);
@@ -744,7 +763,11 @@ export class VelocityEngine {
     // tint fallback, but the visible sky is now an analytic dome and the
     // environment map is PMREM-filtered from it — this is what gives clearcoat,
     // chrome and glass something real to reflect.
-    const sunDir = new THREE.Vector3(Math.cos(sunAngle), Math.max(-0.25, sunElev), 0.42).normalize();
+    const sunDir = new THREE.Vector3(
+      Math.sin(azimuth) * Math.cos(sunElev),
+      Math.max(-0.25, sunElev),
+      -horizonElev
+    ).normalize();
     this.realism.updateSky(
       {
         weather: this.currentWeather,
@@ -770,9 +793,17 @@ export class VelocityEngine {
       roadMat.envMapIntensity = 1.0 + wet * 0.9;
     }
 
-    this.sunLight.intensity = lightningFlash ? 6.5 : 0.2 + dayFactor * 2.4;
-    this.sunLight.color.setHex(isGoldenHour ? 0xffae42 : dayFactor < 0.2 ? 0x6488ea : 0xfff5e4);
-    this.hemiLight.intensity = 0.12 + dayFactor * 0.4;
+    this.sunLight.intensity = lightningFlash ? 6.5 : 0.16 + dayFactor * 3.0;
+    // Low sun is also *weaker* per unit area (more atmosphere to cross), which
+    // is why golden-hour photographs are warm but not blown out. Interpolating
+    // the colour with the sun's altitude instead of snapping at a threshold
+    // keeps the transition continuous from noon to sunset.
+    const warm = THREE.MathUtils.clamp(1 - sunElev / 0.42, 0, 1);
+    const sunTint = new THREE.Color(0xfff6e8).lerp(new THREE.Color(0xff9d3d), Math.pow(warm, 1.6));
+    if (dayFactor < 0.2) sunTint.lerp(new THREE.Color(0x6488ea), 1 - dayFactor / 0.2);
+    this.sunLight.color.copy(sunTint);
+    this.hemiLight.color.copy(new THREE.Color(0x9fc3ea).lerp(new THREE.Color(0xffb877), warm * 0.6));
+    this.hemiLight.intensity = 0.1 + dayFactor * 0.34;
 
     if (this.playerRig) {
       // Shadow cascade follows the car, texel-snapped, so the contact shadow
@@ -1006,6 +1037,15 @@ export class VelocityEngine {
     this.precipPoints = null;
     this.ghostMesh = null;
     this.contactShadows.clear();
+    // Stale references are a real bug: stepGarage() keeps driving whatever rig
+    // it last saw, and enterGarage() only overwrites it after the scene rebuild.
+    // Returning from a race to the garage therefore animated the *race* rig for
+    // one frame and left its flash/brake materials attached.
+    this.garageRig = null;
+    this.garageTurntable = null;
+    this.playerRig = null;
+    this.trackWorld = null;
+    this.bots = [];
   }
 
   private startLoop(): void {
@@ -1962,11 +2002,21 @@ export class VelocityEngine {
       this.camera.position.lerp(new THREE.Vector3(px - fx * 24 + 12, py + 19, pz - fz * 24 + 12), Math.min(1, dt * 5));
       this.camera.lookAt(px + fx * 6, py + 0.8, pz + fz * 6);
     } else {
-      const dist = this.cameraView === 'chase_far' ? 8.6 : 6.1;
-      const height = this.cameraView === 'chase_far' ? 3.2 : 2.25;
+      // Speed-aware chase framing: a fixed 6 m boom under-reads speed at 40
+      // km/h and clips the car's own bumper at 280. The boom stretches and
+      // lowers slightly with speed, and the look-ahead grows so fast corners
+      // stay in frame — the same thing a chase camera does in any driving game.
+      const speedT = THREE.MathUtils.clamp(speedKmh / 260, 0, 1);
+      const far = this.cameraView === 'chase_far';
+      const dist = (far ? 8.6 : 6.1) + speedT * (far ? 2.4 : 1.9);
+      const height = (far ? 3.2 : 2.25) + speedT * 0.35;
       const desired = new THREE.Vector3(px - fx * dist, py + height, pz - fz * dist);
       this.camera.position.lerp(desired, Math.min(1, dt * 11));
-      this.camera.lookAt(px + fx * 6.5, py + 0.95, pz + fz * 6.5);
+      const lookAhead = 6.5 + speedT * 7.5;
+      this.camera.lookAt(px + fx * lookAhead, py + 0.95, pz + fz * lookAhead);
+      // A hair of roll into the corner (0.6°) sells the lateral load without
+      // making the horizon feel like a boat.
+      this.camera.rotation.z = THREE.MathUtils.clamp(-this.playerBody.rollRad * 0.16, -0.045, 0.045);
     }
   }
 
@@ -1977,4 +2027,24 @@ export class VelocityEngine {
     window.removeEventListener('keyup', this.handleKeyUp);
     this.renderer.dispose();
   }
+}
+
+/**
+ * Rough latitude per venue country, used by the solar altitude curve. A circuit
+ * in Norway and a circuit in Brazil do not have the same sun: at 60°N the sun
+ * never gets high, shadows stay long all day, and the light is cooler. This is
+ * a two-line table that buys a lot of "this is a real place".
+ */
+function latitudeForCountry(country: string): number {
+  const c = country.toLowerCase();
+  if (c.includes('noruega') || c.includes('norway') || c.includes('islând') || c.includes('island')) return 61;
+  if (c.includes('escócia') || c.includes('scotland') || c.includes('finlând')) return 57;
+  if (c.includes('suíça') || c.includes('swiss') || c.includes('áustria') || c.includes('austria')) return 47;
+  if (c.includes('jap') || c.includes('itália') || c.includes('italy')) return 40;
+  if (c.includes('eua') || c.includes('usa') || c.includes('estados')) return 36;
+  if (c.includes('marrocos') || c.includes('egito') || c.includes('egyp') || c.includes('dubai') || c.includes('emirados')) return 26;
+  if (c.includes('brasil') || c.includes('brazil')) return -23;
+  if (c.includes('austrália') || c.includes('australia')) return -33;
+  if (c.includes('marte') || c.includes('mars') || c.includes('orbital')) return 0;
+  return 23;
 }
