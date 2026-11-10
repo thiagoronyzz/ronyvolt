@@ -47,6 +47,7 @@ export function harvest(root, opts = {}) {
   const tmp = new THREE.Vector3();
   root.updateMatrixWorld(true);
 
+  let lastTint = null;
   const pushMesh = (geo, matWorld, material, groupsOverride) => {
     const pos = geo.attributes.position;
     if (!pos) return;
@@ -72,6 +73,7 @@ export function harvest(root, opts = {}) {
       const c = getV(i2).clone();
       const m = readMat(slotOf(t));
       let col = m && m.color ? [m.color.r, m.color.g, m.color.b] : [0.6, 0.6, 0.62];
+      if (lastTint) col = [col[0] * lastTint[0], col[1] * lastTint[1], col[2] * lastTint[2]];
       const vcAttr = geo.attributes.color;
       if (vcAttr && m && m.vertexColors) {
         const cr = (vcAttr.getX(i0) + vcAttr.getX(i1) + vcAttr.getX(i2)) / 3;
@@ -102,6 +104,7 @@ export function harvest(root, opts = {}) {
     }
   };
 
+  let instanceTint = null;
   const hiddenRoots = new Set();
   root.traverse((o) => {
     if (o === root) return;
@@ -112,6 +115,9 @@ export function harvest(root, opts = {}) {
     if (!o.isMesh || o.visible === false) return;
     if (hiddenRoots.has(o)) return;
     if (hide(o)) return;
+    instanceTint = null;
+    lastTint = null;
+    if (o.isInstancedMesh && o.instanceColor) instanceTint = o.instanceColor;
     const geo = o.geometry;
     if (!geo || !geo.attributes || !geo.attributes.position) return;
     if (o.isInstancedMesh) {
@@ -120,6 +126,9 @@ export function harvest(root, opts = {}) {
       const mtx = new THREE.Matrix4();
       for (let i = 0; i < n; i++) {
         o.getMatrixAt(i, mtx);
+        if (instanceTint) {
+          lastTint = [instanceTint.getX(i), instanceTint.getY(i), instanceTint.getZ(i)];
+        } else lastTint = null;
         const world = new THREE.Matrix4().multiplyMatrices(o.matrixWorld, mtx);
         // instance colours are ignored here; material colour carries the look
         pushMesh(geo, world, o.material);

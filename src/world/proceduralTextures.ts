@@ -1010,6 +1010,41 @@ export function groundDetailMaps(baseHex: string): {
   });
 }
 
+/**
+ * Bedrock / scree maps for the landscape.
+ *
+ * A hillside's shading is mostly its *normal*, but at 5–30 m the eye also reads
+ * fracture lines: bedding planes, vertical joints, loose scree. This builds a
+ * height field from a ridged multifractal (sharp creases instead of blobs) plus
+ * a directional bedding warp, then converts it to a normal + roughness pair.
+ * The terrain multiplies this over its vertex-coloured geology, which is what
+ * makes a slope read as rock rather than as smooth clay.
+ */
+export function terrainRockMaps(): {
+  normalMap: THREE.CanvasTexture;
+  roughnessMap: THREE.CanvasTexture;
+} {
+  return cached('terrain-rock', () => {
+    const w = 256;
+    const fracture = (u: number, v: number) => {
+      // Ridged noise: 1 - |2n-1| squared, which produces creases.
+      const n1 = tileableFbm2(u * 12, v * 9, 9, 4, 31);
+      const r1 = Math.pow(1 - Math.abs(n1 * 2 - 1), 2);
+      // Bedding: long horizontal strata, warped so they are not stripes.
+      const warp = tileableFbm2(u * 4, v * 4, 4, 2, 77) * 0.9;
+      const bed = Math.pow(Math.sin((v * 22 + warp) * Math.PI) * 0.5 + 0.5, 3);
+      // Loose scree: high-frequency grain.
+      const grit = tileableFbm2(u * 90, v * 90, 90, 2, 13);
+      return r1 * 0.55 + bed * 0.3 + grit * 0.15;
+    };
+    const { normalMap, roughnessMap } = bakeHeightSet(w, w, fracture, {
+      strength: 2.2,
+      roughnessFn: (u, v) => 0.7 + tileableFbm2(u * 20, v * 20, 20, 3, 43) * 0.28,
+    });
+    return { normalMap, roughnessMap: roughnessMap! };
+  });
+}
+
 /** Sky-ish studio environment strip for the garage (kept procedural, cheap). */
 export function studioStripTexture(): THREE.CanvasTexture {
   return cached('studio-strip', () => {

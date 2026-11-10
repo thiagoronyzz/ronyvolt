@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { BiomeTheme, CustomTrackData, GameMode, SavedPoster, TrackSpec } from '../types/game';
+import { buildTerrainV2, terrainShapeFor } from '../world/Terrain';
+import { buildForest } from '../world/Vegetation';
 import {
   buildBuilding,
   buildDelineator,
@@ -299,6 +301,67 @@ export function buildTrackWorld(
     sampleTangents.push(curve.getTangentAt(t).normalize());
   }
   const totalLengthM = curve.getLength();
+  const biomePalette = paletteForBiome(track.biome);
+
+  // --- Landscape -----------------------------------------------------------
+  // Two-tier terrain: an inner plate with metric detail carved for the road, and
+  // a 6 km outer shell carrying the macro landform and ridgelines that give the
+  // horizon its shape. The old build used a single 1.8 km plane with ±7 m of
+  // noise, which is optically flat: it produced a razor-line horizon and no
+  // shading structure at all.
+  const landscape = buildTerrainV2(track.biome, samplePoints, roadWidth, track.seed);
+  group.add(landscape.group);
+  terrainHeightAt = landscape.heightAt;
+
+  // Horizon vegetation band, tinted from the biome's own foliage so the Sahara
+  // does not get a temperate forest on its skyline.
+  const horizonShape = terrainShapeFor(track.biome);
+  const bandCentre = new THREE.Vector3(0, 0, 0);
+  const bandHue = new THREE.Color(biomePalette.foliage[0]).lerp(new THREE.Color(horizonShape.hazeHex), 0.18);
+  group.add(
+    buildTreeLineBand(
+      bandCentre,
+      2600,
+      Math.max(26, horizonShape.ridgeAmp * 0.18),
+      // Pass the palette through untouched except for the foliage tint, which
+      // is what the band actually samples.
+      { ...biomePalette, foliage: [`#${bandHue.getHexString()}`] } as typeof biomePalette,
+      track.seed + 91
+    )
+  );
+
+  // --- Forest: the actual vegetation --------------------------------------
+  // The old build placed one full-detail tree every 6 spline samples, 8–32 m
+  // from the centreline: the triangle cost of a real tree with the coverage of
+  // a garden ornament. This scatters 3 LOD rings instead, so the verge, the
+  // mid-field and the ridges are all covered.
+  const isUrbanBiome =
+    track.biome === 'neo_tokyo' ||
+    track.biome === 'sao_paulo' ||
+    track.biome === 'cyber_2099' ||
+    track.biome === 'london_fog' ||
+    track.biome === 'dubai_sky';
+  const isDesertBiome = track.biome === 'sahara_desert' || track.biome === 'mars_colony' || track.biome === 'space_orbital';
+  const isRcBiome = track.biome.startsWith('rc_');
+  const forestDensity = isRcBiome ? 0 : isUrbanBiome ? 0.25 : isDesertBiome ? 0.18 : 1;
+  if (forestDensity > 0) {
+    const forest = buildForest(
+      {
+        count: Math.round((mode === 'derby' ? 1200 : 4200) * forestDensity),
+        minRoadDist: roadWidth * 0.5 + (isUrbanBiome ? 12 : 6),
+        maxRoadDist: 1200,
+        radiusM: 1250,
+        species: biomePalette.species,
+        density: forestDensity,
+        seed: track.seed + 417,
+      },
+      biomePalette,
+      landscape.heightAt,
+      landscape.distToRoad
+    );
+    group.add(forest.group);
+  }
+
 
   // 2. Ground Plane by Biome
   const groundColors: Partial<Record<BiomeTheme, number>> = {
@@ -336,15 +399,9 @@ export function buildTrackWorld(
   // Terrain: displaced, height-coloured, with real micro-detail. The old build
   // used a 4.2 km flat plane in one flat colour, which is why the road looked
   // like it was laid on a table.
-  const biomePalette = paletteForBiome(track.biome);
-  const terrain = buildTerrain(track.biome, 1800, 90, track.seed, mode === 'derby' ? 0.6 : 6.5);
-  group.add(terrain.mesh);
-  terrainHeightAt = terrain.heightAt;
+  // The landscape is built *after* the road exists (see below) because it needs
+  // the spline to carve the verge. Nothing between here and there needs it.
 
-  // Far tree band: a soft painted ring that hides the terrain's edge and gives
-  // the horizon the layered, hazy quality of real vegetation at distance.
-  const bandCentre = new THREE.Vector3(0, 0, 0);
-  group.add(buildTreeLineBand(bandCentre, 760, 46, biomePalette, track.seed + 91));
 
   // 3. Build Ribbon Road Geometry + Red/White (or Green/Yellow Interlagos!) Kerbs
   const roadPositions: number[] = [];
@@ -509,7 +566,8 @@ export function buildTrackWorld(
         metalness: 0.45,
       });
       const bldg = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bw), bMat);
-      bldg.position.set(propPos.x, pt.y + bh * 0.5 - 1, propPos.z);
+      const groundY = terrainHeightAt(propPos.x, propPos.z);
+      bldg.position.set(propPos.x, groundY + bh * 0.5 - 1, propPos.z);
       group.add(bldg);
 
       if (track.biome === 'neo_tokyo' || track.biome === 'cyber_2099' || track.biome === 'sao_paulo') {
@@ -517,7 +575,7 @@ export function buildTrackWorld(
           new THREE.BoxGeometry(bw * 1.04, 2.2, bw * 1.04),
           new THREE.MeshBasicMaterial({ color: neonColors[i % neonColors.length] })
         );
-        neonSign.position.set(propPos.x, pt.y + Math.min(bh - 3, 12 + (i % 18)), propPos.z);
+        neonSign.position.set(propPos.x, groundY + Math.min(bh - 3, 12 + (i % 18)), propPos.z);
         group.add(neonSign);
       }
     } else if (track.category === 'rc_revolt') {
@@ -529,7 +587,7 @@ export function buildTrackWorld(
           : new THREE.BoxGeometry(9, 14, 9),
         new THREE.MeshStandardMaterial({ color: giantColor, roughness: 0.35 })
       );
-      giantProp.position.set(propPos.x, pt.y + 6.5, propPos.z);
+      giantProp.position.set(propPos.x, terrainHeightAt(propPos.x, propPos.z) + 6.5, propPos.z);
       group.add(giantProp);
     } else if (track.biome === 'underwater_dome') {
       // Glass Arch Ring + Swimming Whale/Shark silhouettes!
@@ -561,7 +619,7 @@ export function buildTrackWorld(
           fan.position.set(f, 5.6, 0);
           stand.add(fan);
         }
-        stand.position.set(propPos.x, pt.y, propPos.z);
+        stand.position.set(propPos.x, terrainHeightAt(propPos.x, propPos.z), propPos.z);
         stand.lookAt(pt.x, pt.y + 2, pt.z);
         group.add(stand);
 
@@ -571,7 +629,7 @@ export function buildTrackWorld(
             new THREE.SphereGeometry(2.6, 10, 10),
             new THREE.MeshBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.42 })
           );
-          smokePuff.position.set(propPos.x, pt.y + 6, propPos.z);
+          smokePuff.position.set(propPos.x, terrainHeightAt(propPos.x, propPos.z) + 6, propPos.z);
           group.add(smokePuff);
           const baseY = pt.y + 5;
           animatedProps.push({
