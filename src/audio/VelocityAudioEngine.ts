@@ -1,5 +1,7 @@
 import { CameraView, CarSpec, CarTuneSetup, EngineType } from '../types/game';
 import { AcousticEnvironment, EngineAcoustics } from './EngineAcoustics';
+import { soundtrackPlayer } from './SoundtrackPlayer';
+import { DEFAULT_PLAYLIST } from './Soundtrack';
 
 export interface RadioStationSpec {
   id: string;
@@ -39,7 +41,7 @@ export class VelocityAudioEngine {
   private customMediaNode: MediaElementAudioSourceNode | null = null;
 
   private isMuted = false;
-  private currentStationId = 'eurobeat';
+  private currentStationId = 'soundtrack';
   private stepTimer: number | null = null;
   private stepIndex = 0;
   private lastThrottle = 0;
@@ -149,12 +151,20 @@ export class VelocityAudioEngine {
     this.musicGain.connect(this.bassAnalyser);
     this.bassAnalyser.connect(this.masterGain);
 
+    // Original soundtrack: a real sequencer with a look-ahead scheduler, its own
+    // per-instrument envelopes and a side-chain duck. It plays through the same
+    // music bus, so the bass analyser (and the chassis-shake easter egg) still
+    // see it.
+    const firstAttach = !soundtrackPlayer.isAttached;
+    soundtrackPlayer.attach(this.ctx, this.musicGain, noiseBuffer);
+    if (firstAttach) soundtrackPlayer.setPlaylist(DEFAULT_PLAYLIST);
+    if (this.currentStationId === 'soundtrack') soundtrackPlayer.ensurePlaying();
+
     // Firing-order acoustic model replaces the three-oscillator bank below.
     // The old bank is kept instantiated (it is referenced by other features)
     // but its gain stays at zero: two engine sounds layered is worse than one.
     this.acoustics = new EngineAcoustics(this.ctx, this.masterGain, this.currentEngineType);
 
-    this.startRadioSequencer();
   }
 
   public setAcousticEnvironment(env: AcousticEnvironment): void {
@@ -205,15 +215,94 @@ export class VelocityAudioEngine {
   }
 
   public setStation(stationId: string): void {
+    // Any gesture from the UI should be enough to unblock audio on browsers
+    // that start an AudioContext in the "suspended" state.
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
     this.currentStationId = stationId;
     if (this.customAudioEl) {
-      if (stationId === 'custom_usb') {
-        this.customAudioEl.play().catch(() => {});
-      } else {
+      if (stationId.startsWith('track:') || stationId === 'off' || stationId === 'soundtrack') {
         this.customAudioEl.pause();
+      } else if (stationId === 'custom_usb') {
+        this.customAudioEl.play().catch(() => {});
       }
     }
+    // New soundtrack path: `track:<id>` plays one original composition and
+    // `soundtrack` plays the player's playlist. The legacy chiptune stations
+    // stay available, so nothing that used to work stops working.
+    if (stationId === 'off') {
+      soundtrackPlayer.stop();
+    } else if (stationId === 'soundtrack') {
+      soundtrackPlayer.play();
+    } else if (stationId.startsWith('track:')) {
+      soundtrackPlayer.play(stationId.slice(6));
+    } else if (stationId === 'custom_usb') {
+      soundtrackPlayer.stop();
+    } else {
+      // Legacy station: silence the sequenced soundtrack so two beds never
+      // overlap, and let the old 16-step sequencer run.
+      soundtrackPlayer.stop();
+    }
     this.startRadioSequencer();
+  }
+
+  /** Playlist controls surfaced by the garage player UI. */
+  public setPlaylist(ids: string[]): void {
+    soundtrackPlayer.setPlaylist(ids);
+    if (this.currentStationId === 'soundtrack') soundtrackPlayer.play();
+  }
+
+  public getPlaylist(): string[] {
+    return soundtrackPlayer.getPlaylist();
+  }
+
+  public soundtrackNext(): string | null {
+    soundtrackPlayer.next();
+    this.currentStationId = 'soundtrack';
+    return soundtrackPlayer.currentTrack?.id ?? null;
+  }
+
+  public soundtrackPrevious(): string | null {
+    soundtrackPlayer.previous();
+    this.currentStationId = 'soundtrack';
+    return soundtrackPlayer.currentTrack?.id ?? null;
+  }
+
+  public setMusicVolume(v: number): void {
+    soundtrackPlayer.setVolume(v);
+    if (this.musicGain && this.ctx) {
+      // The old sequencer shared this bus; keep it audible but proportional.
+      this.musicGain.gain.setTargetAtTime(0.25 * Math.max(0.3, v), this.ctx.currentTime, 0.1);
+    }
+  }
+
+  public getMusicVolume(): number {
+    return soundtrackPlayer.getVolume();
+  }
+
+  /** What the soundtrack is playing right now (null when silent). */
+  public getNowPlaying(): { id: string; title: string } | null {
+    const t = soundtrackPlayer.currentTrack;
+    if (!t || !soundtrackPlayer.isPlaying) return null;
+    return { id: t.id, title: t.title };
+  }
+
+  /**
+   * Plays one soundtrack track. Audio needs a user gesture on most browsers,
+   * so this is the entry point every UI button should use rather than calling
+   * the player directly.
+   */
+  public playTrack(trackId: string): void {
+    if (!this.ctx) {
+      this.init();
+      if (!this.ctx) return;
+    }
+    if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    this.currentStationId = 'soundtrack';
+    // Track launched from the list: make it the head of the playlist so
+    // "next"/"previous" walk the catalogue from there.
+    const rest = soundtrackPlayer.getPlaylist().filter((id) => id !== trackId);
+    soundtrackPlayer.setPlaylist([trackId, ...rest]);
+    soundtrackPlayer.play(trackId);
   }
 
   public getStation(): string {
@@ -232,6 +321,16 @@ export class VelocityAudioEngine {
     }
     this.customAudioEl.src = url;
     this.setStation('custom_usb');
+  }
+
+  /**
+   * Called every frame by the engine loop: feeds the music side-chain and the
+   * subtle tempo-with-speed stretch. Keeping it here means the soundtrack
+   * responds to what the car is doing, which is what makes it feel live.
+   */
+  public updateMusicDynamics(load: number, speedKmh: number): void {
+    soundtrackPlayer.setEngineLoad(load);
+    soundtrackPlayer.setSpeedTempo(speedKmh);
   }
 
   public getBassEnergy(): number {
@@ -491,7 +590,13 @@ export class VelocityAudioEngine {
       window.clearInterval(this.stepTimer);
       this.stepTimer = null;
     }
-    if (this.currentStationId === 'off' || this.currentStationId === 'custom_usb') return;
+    if (
+      this.currentStationId === 'off' ||
+      this.currentStationId === 'custom_usb' ||
+      this.currentStationId === 'soundtrack' ||
+      this.currentStationId.startsWith('track:')
+    )
+      return;
 
     const station = RADIO_STATIONS.find((s) => s.id === this.currentStationId) ?? RADIO_STATIONS[1];
     const stepMs = Math.round((60000 / station.bpm) / 2);

@@ -299,6 +299,15 @@ export class RealismRenderer {
   private gradePass: ShaderPass;
   private bokehPass: BokehPass;
 
+  /**
+   * Interior sets (the garage) need their own air: a neutral studio bounce
+   * instead of the outdoor horizon. Overriding the *sky uniforms* rather than
+   * swapping the dome means the IBL keeps working, so paint, chrome and glass
+   * still have something shaped to reflect indoors.
+   */
+  private skyOverride: { zenith: number; horizon: number; sun: number; sunIntensity: number } | null = null;
+  private fogOverride: { color: number; density: number } | null = null;
+
   private lastEnvSunY = -99;
   private lastEnvWeather = '';
   private lastEnvTime = 0;
@@ -416,6 +425,18 @@ export class RealismRenderer {
     if (value !== null) this.renderer.toneMappingExposure = value;
   }
 
+  /** Locks the dome to a neutral interior bounce (or clears it with null). */
+  public setSkyOverride(o: { zenith: number; horizon: number; sun: number; sunIntensity: number } | null): void {
+    this.skyOverride = o;
+    this.lastEnvWeather = '__override__';
+    this.lastEnvTime = -999;
+  }
+
+  /** Forces scene fog (used indoors so the hall does not fog to the horizon). */
+  public setFogOverride(o: { color: number; density: number } | null): void {
+    this.fogOverride = o;
+  }
+
   public setSize(width: number, height: number): void {
     this.composer.setSize(width, height);
     this.bokehPass.setSize(width, height);
@@ -515,6 +536,10 @@ export class RealismRenderer {
     zenith.lerp(new THREE.Color(0x05070f), 1 - day);
     horizon.lerp(new THREE.Color(0x0b1020), 1 - day);
 
+    if (this.skyOverride) {
+      zenith.setHex(this.skyOverride.zenith);
+      horizon.setHex(this.skyOverride.horizon);
+    }
     u.uZenith.value.copy(zenith);
     u.uHorizon.value.copy(horizon);
     u.uSunDir.value.copy(input.sunDirection).normalize();
@@ -523,8 +548,15 @@ export class RealismRenderer {
     u.uLightning.value = input.lightning ? 1 : 0;
 
     const golden = Math.abs(input.sunDirection.y) < 0.26;
-    const sunColor = new THREE.Color(golden ? 0xffa24a : 0xfff4e2);
+    const sunColor = this.skyOverride
+      ? new THREE.Color(this.skyOverride.sun)
+      : new THREE.Color(golden ? 0xffa24a : 0xfff4e2);
     u.uSunColor.value.copy(sunColor);
+    if (this.skyOverride) {
+      u.uSunIntensity.value = this.skyOverride.sunIntensity;
+      u.uCloudiness.value = 0;
+      u.uHaze.value = 0.12;
+    }
     u.uSunIntensity.value = 0.35 + day * 0.9;
     u.uCloudiness.value =
       input.weather.precipitationIntensity > 0.05 ? Math.min(0.95, 0.35 + input.weather.precipitationIntensity * 0.6) : 0.22;
@@ -533,7 +565,15 @@ export class RealismRenderer {
     // Match fog to the horizon so distant geometry dissolves into the sky
     // instead of into a different colour (a classic compositing tell).
     const fogColor = horizon.clone().lerp(zenith, 0.25);
-    if (this.scene.fog instanceof THREE.FogExp2) {
+    if (this.fogOverride) {
+      fogColor.setHex(this.fogOverride.color);
+      if (this.scene.fog instanceof THREE.FogExp2) {
+        this.scene.fog.color.copy(fogColor);
+        this.scene.fog.density = this.fogOverride.density;
+      } else {
+        this.scene.fog = new THREE.FogExp2(this.fogOverride.color, this.fogOverride.density);
+      }
+    } else if (this.scene.fog instanceof THREE.FogExp2) {
       this.scene.fog.color.copy(fogColor);
     } else {
       this.scene.fog = new THREE.FogExp2(fogColor.getHex(), input.weather.visibilityFog);

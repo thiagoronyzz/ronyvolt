@@ -24,6 +24,7 @@ import { TrackGlobeModal } from './components/TrackGlobeModal';
 import { CareerStoryPanel } from './components/CareerStoryPanel';
 import { TrackEditorModal } from './components/TrackEditorModal';
 import { CompanionAppModal, TelemetryOverlay } from './components/TelemetryAndCompanion';
+import { SoundtrackModal } from './components/SoundtrackModal';
 import {
   CinemaLut,
   LUT_CSS_FILTERS,
@@ -104,7 +105,7 @@ export const App: React.FC = () => {
   // Scene & UI Modals
   const [inRace, setInRace] = useState(false);
   const [activeModal, setActiveModal] = useState<
-    'none' | 'cars' | 'tuning' | 'tracks' | 'career' | 'editor' | 'companion'
+    'none' | 'cars' | 'tuning' | 'tracks' | 'career' | 'editor' | 'companion' | 'soundtrack'
   >('none');
 
   // Garage Interactive State
@@ -552,6 +553,9 @@ export const App: React.FC = () => {
             <button onClick={() => setActiveModal('editor')} style={dockBtn}>
               🛠️ Editor de Pistas
             </button>
+            <button onClick={() => setActiveModal('soundtrack')} style={dockBtn}>
+              🎵 Playlist da Viagem
+            </button>
             <button onClick={() => setActiveModal('companion')} style={dockBtn}>
               📱 Companion App
             </button>
@@ -717,6 +721,8 @@ export const App: React.FC = () => {
           onClose={() => setActiveModal('none')}
         />
       )}
+
+      {activeModal === 'soundtrack' && <SoundtrackModal onClose={() => setActiveModal('none')} />}
 
       {activeModal === 'companion' && (
         <CompanionAppModal

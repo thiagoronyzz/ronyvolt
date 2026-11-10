@@ -39,6 +39,7 @@
  * differently on my 144 Hz monitor" complaints are made of.
  */
 
+import * as THREE from 'three';
 import { CarSpec, CarTuneSetup, DamageState, WeatherPreset, WheelTelemetry } from '../types/game';
 import {
   AssistMode,
@@ -107,7 +108,8 @@ export class VehicleDynamicsBody {
 
   // --- Body-frame velocity state (kept between sub-steps) ---
   private u = 0; // forward, m/s
-  private vLat = 0; // lateral, +right, m/s
+  /** Lateral body velocity (m/s, +right). Public for telemetry and tests. */
+  public vLat = 0;
   public angularVelYaw = 0;
 
   // --- Attitude derived from suspension loads ---
@@ -154,6 +156,8 @@ export class VehicleDynamicsBody {
   private steerState = 0;
   private lastAx = 0;
   private lastAy = 0;
+  /** 0..1 electronic torque cut demanded by the stability controller. */
+  private tractionCut = 0;
   private absCycling = 0;
   private lastShiftInput = false;
   private tireSpecKey = '';
@@ -554,7 +558,7 @@ export class VehicleDynamicsBody {
       Math.min(maxSteerDelta, steerTarget - this.steerState)
     );
     const speedAbs = Math.abs(this.u);
-    const maxSteer = (isRC ? 0.62 : 0.46) * (1 / (1 + speedAbs * 0.026));
+    const maxSteer = (isRC ? 0.62 : 0.46) * (1 / (1 + speedAbs * 0.018));
     let steerAngle = this.steerState * maxSteer;
     // Puncture / bent suspension pulls the wheel: modelled as an offset on the
     // steering angle, which the tyre model then turns into a real yaw moment.
@@ -685,7 +689,7 @@ export class VehicleDynamicsBody {
       let driveTorque = 0;
       if (driveIndexes.includes(i) && this.gear !== 0) {
         const share = this.differentialShare(i, driveIndexes);
-        driveTorque = axleTorque * share;
+        driveTorque = axleTorque * share * (1 - this.tractionCut);
         if (p.assistMode !== 'hardcore_sim' && c.slipRatio > 0.14 && this.u > 1 && p.throttle > 0.05) {
           driveTorque *= 0.35;
         }
@@ -766,7 +770,10 @@ export class VehicleDynamicsBody {
 
     this.u += ax * h;
     this.vLat += ay * h;
-    this.angularVelYaw += yawAccel * h;
+    // NOTE: the yaw rate is integrated once, below, together with the tyre
+    // self-aligning damping (section 8b). Integrating yawAccel here *and* there
+    // applies the yaw moment twice, which doubles the rotation rate of every car
+    // in the game — the "os carros giram muito" report.
 
     // Stop condition: no drive, no roll — remove residual jitter.
     if (Math.abs(this.u) < 0.12 && p.throttle < 0.04 && p.brake > 0.05) {
@@ -787,6 +794,121 @@ export class VehicleDynamicsBody {
 
     this.lastAx = specificAx;
     this.lastAy = specificAy;
+
+    // --- 8b. Tyre self-aligning damping ---------------------------------------
+    // This is the single most important term for "the car will not stop
+    // spinning", and its absence is why the build felt like driving on ice.
+    //
+    // A real pneumatic tyre's lateral force peaks at ~7-9 deg of slip and then
+    // *falls*. That falling branch is negative damping: it feeds yaw energy
+    // instead of removing it, so once a slide starts it self-amplifies. What
+    // keeps a real car stable is the aligning torque (M_z ≈ -k·slip·Fz), which
+    // is a genuine yaw spring attached to the contact patch and grows with
+    // speed. Without it, a flick of the wheel at 60 km/h puts the car into a
+    // spin no input can catch, which is exactly the reported behaviour.
+    //
+    // Modelled here as a linear yaw damper whose coefficient is the physical
+    // one: each axle contributes a lateral stiffness C_alpha (N/rad) times the
+    // square of its distance from the centre of gravity, divided by speed.
+    {
+      const cAlphaFront = 2 * (this.tireSpec.muYPeak * frontLoadSum) / Math.max(0.06, this.tireSpec.peakSlipAngleRad);
+      const cAlphaRear = 2 * (this.tireSpec.muYPeak * rearLoadSum) / Math.max(0.06, this.tireSpec.peakSlipAngleRad);
+      const speedSafe = Math.max(4, Math.abs(this.u));
+      // Aligning stiffness (N·m/rad) of the two axles about the CoG.
+      const kAlign = (cAlphaFront * halfBase * halfBase + cAlphaRear * halfBase * halfBase) / speedSafe;
+      // Beyond the peak, the tyre's own slope makes it negative; the damper must
+      // not become a spring that fights the driver, so it is one-sided.
+      // The coefficient matters enormously and is easy to get wrong in the
+      // safe-looking direction: at 0.3 the yaw damper removed so much yaw rate
+      // that a road car peaked at 0.63 r/s at 80 km/h while the front tyres were
+      // already at 14 deg of slip - i.e. the tyres were sliding but the body was
+      // refusing to rotate. That reads to a player as heavy, dead understeer
+      // ("o carro não faz a curva"). 0.14 keeps the stability without damping the
+      // corner away; the numbers are in tools/handling.ts.
+      const dampCoef = kAlign * 0.22;
+      const dampTorque = -this.angularVelYaw * dampCoef;
+      // Integrate the damping implicitly: this term is stiff (a few hundred
+      // 1/s at speed) and an explicit step at 240 Hz would ring.
+      const yawRateDelta = (yawAccel + dampTorque / izz) * h;
+      this.angularVelYaw += yawRateDelta / (1 + (dampCoef / izz) * h);
+      // Yaw-rate ceiling.
+      //
+      // The old limit was `speed / wheelbase * 1.9 + 0.4`, which is nearly double
+      // the kinematic limit of a bicycle model. Nothing below it was therefore
+      // ever flagged, and a car could sit at 50 deg of body slip while the clamp
+      // cheerfully allowed it - the "car spins out" report. The ceiling is now
+      // the kinematic limit with a realistic 1.25 allowance for slip angle and a
+      // small floor so low-speed manoeuvring still works.
+      const kinematicLimit = Math.abs(this.u) / Math.max(0.9, wheelbaseM) * Math.tan(0.62);
+      const yawLimit = Math.min(2.6, Math.max(0.5, kinematicLimit * 1.25));
+      this.angularVelYaw = THREE.MathUtils.clamp(this.angularVelYaw, -yawLimit, yawLimit);
+    }
+
+    // --- 8c. Driver aids: ESC, yaw assist, countersteer help -----------------
+    // Assists are *not* a substitute for the physics above; they sit on top of a
+    // body that already has stable yaw dynamics. Each assist is a real control
+    // system with a real actuator (differential brake, torque cut, steering
+    // torque overlay), so it can be disabled and the car still behaves.
+    {
+      const speedAbs2 = Math.abs(this.u);
+      if (p.assistMode !== 'hardcore_sim' && speedAbs2 > 3) {
+        // Reference yaw from the driver's intent: a neutral-steer bicycle model
+        // with the understeer gradient left in. This is what the car *should*
+        // be rotating at for the current steer angle and speed.
+        const deltaActual = steerAngle;
+        const kUnder = Math.max(0.0008, 0.0016 + (frontLoadSum - rearLoadSum) / Math.max(1, massKg * g) * 0.002);
+        const desiredYaw =
+          (speedAbs2 * Math.tan(deltaActual)) /
+          (wheelbaseM + kUnder * speedAbs2 * speedAbs2) *
+          (this.u >= 0 ? 1 : -1);
+
+        const yawError = this.angularVelYaw - desiredYaw;
+        // Proportional + derivative on the *slip* (not on steer), which is how a
+        // production ESC works: it only intervenes when the body slip exceeds
+        // the driver's demand, never to make the car faster.
+        const beta = Math.atan2(this.vLat, Math.max(2, Math.abs(this.u))) * (this.u >= 0 ? 1 : -1);
+        const escGain = p.assistMode === 'casual' ? 1.0 : 0.55;
+        const oversteer = Math.sign(yawError) * Math.min(1, Math.max(0, Math.abs(yawError) - 0.06) * 1.4);
+        const betaTerm = Math.sign(beta) * Math.min(1, Math.max(0, Math.abs(beta) - 0.05) * 15);
+
+        // Actuator 1: brake the outside front wheel (the classic ESC yaw
+        // correction). Applied as a wheel torque so it shows up in the tyre
+        // model, the brake temperature and the telemetry.
+        if (oversteer > 0 && Math.abs(yawError) > 0.06) {
+          const brakeWheel = yawError > 0 ? 1 : 0; // outside front
+          const mag = Math.min(1, oversteer * escGain * 1.8);
+          this.wheelOmega[brakeWheel] *= 1 - 0.35 * mag * Math.min(1, h * 40);
+          this.brakeTempC = Math.min(720, this.brakeTempC + mag * 6 * h);
+        }
+
+        // Actuator 2: torque cut. If the rear is sliding under power, cutting
+        // drive is the fastest way back to grip — and it is what the player
+        // feels as "the car saved itself".
+        if (betaTerm > 0.15 && p.throttle > 0.2) {
+          const cut = Math.min(0.75, betaTerm * 0.6 * escGain);
+          this.tractionCut = cut;
+        } else {
+          this.tractionCut *= Math.max(0, 1 - h * 6);
+        }
+
+        // Actuator 3: countersteer assist. In casual mode the front wheels get
+        // an automatic opposite-lock overlay proportional to body slip; this is
+        // the only assist that touches steering, and it is disabled in pro.
+        if (p.assistMode === 'casual' && Math.abs(beta) > 0.09) {
+          const overlay = THREE.MathUtils.clamp(-beta * 1.4, -0.32, 0.32);
+          this.steerState = THREE.MathUtils.clamp(this.steerState * (1 - h * 4) + overlay * h * 4, -1, 1);
+        }
+
+        // Yaw-rate ceiling: never allow the body to rotate faster than the front
+        // axle could ask for (plus a margin for a deliberate handbrake spin).
+        const allowed = Math.abs(desiredYaw) + (p.handbrake ? 2.2 : 0.55);
+        if (Math.abs(this.angularVelYaw) > allowed) {
+          this.angularVelYaw = Math.sign(this.angularVelYaw) * allowed;
+        }
+      } else {
+        this.tractionCut *= Math.max(0, 1 - h * 6);
+      }
+    }
 
     // --- 9. Thermals & consumables -----------------------------------------
     const coolingAir = speedAbs * 0.14;

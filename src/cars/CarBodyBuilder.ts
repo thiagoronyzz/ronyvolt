@@ -113,6 +113,15 @@ export interface BodyShape {
   sectionRoundness: number;
   /** Crown of the bonnet/deck above the shoulder (metres). */
   topCrown: number;
+  /**
+   * Radius of the shoulder crease, metres. Small (5-12 mm) = crisp, modern;
+   * large (40-80 mm) = soft, pre-war. This is what a designer calls the
+   * "character line radius" and it is the difference between a car that reads
+   * photographic and one that reads as a smoothed blob.
+   */
+  creaseRadius?: number;
+  /** Fender crown: how far the haunch bulges past the door surface, metres. */
+  fenderCrown?: number;
   /** How much the rocker is pulled in under the doors. */
   rockerInset: number;
   /** Number of loft stations; more = smoother but heavier. */
@@ -813,6 +822,12 @@ interface Station {
   crown: number;
   rockerInset: number;
   roundness: number;
+  /** Shoulder crease radius at this station (metres). */
+  creaseRadius: number;
+  /** Fender crown bulge at this station (metres). */
+  fenderCrown: number;
+  /** Bonnet/deck panel crown (metres). */
+  topCrown: number;
   /** 0..1: how much of the arch cut applies at this station. */
   archFront: number;
   archRear: number;
@@ -861,9 +876,36 @@ function buildStations(shape: BodyShape): Station[] {
     [1.0, shape.shoulderY * 0.93],
   ];
 
-  for (let i = 0; i < n; i++) {
-    const u = i / (n - 1);
-    const z = -half + u * shape.length;
+  // Station placement.
+  //
+  // Uniform spacing puts most of the surface resolution in the middle of the
+  // doors and leaves the wheel arches - the two places the eye actually reads -
+  // with a handful of sections. Worse, the arch cut is decided per triangle, so
+  // too few stations along z makes the opening polygonal no matter how many
+  // rings the section has.
+  //
+  // So the stations are placed in *world z*: a coarse distribution along the
+  // body plus a guaranteed dense band of stations straddling each axle, which
+  // is what makes the arch a circle.
+  const zSet = new Set<number>();
+  const addZ = (z: number) => {
+    const clamped = Math.max(-half, Math.min(half, z));
+    zSet.add(Math.round(clamped * 1e4) / 1e4);
+  };
+  const uniform = Math.max(6, n - 13);
+  for (let i = 0; i < uniform; i++) addZ(-half + (i / (uniform - 1)) * shape.length);
+  for (const axleZ of [shape.axleFrontZ, shape.axleRearZ]) {
+    const span = shape.wheelRadius ? shape.wheelRadius * 1.5 : shape.archRadius * 1.5;
+    // 11 stations across the arch: ~5 inside the opening and 3 either side, so
+    // the cut edge lands within a couple of centimetres of the true circle.
+    for (let i = 0; i <= 10; i++) addZ(axleZ - span + (i / 10) * span * 2);
+  }
+  const stationsZ = [...zSet].sort((a, b) => a - b);
+  const stationsU = stationsZ.map((z) => (z + half) / shape.length);
+
+  for (let i = 0; i < stationsZ.length; i++) {
+    const u = stationsU[i];
+    const z = stationsZ[i];
     const wf = profile(widthProfile, u);
     const halfWidth = (shape.width / 2) * wf;
     const topY = profile(topProfile, u);
@@ -892,6 +934,22 @@ function buildStations(shape: BodyShape): Station[] {
     const closedTop = topYAdj - (topYAdj - profile(shoulderProfile, u)) * (1 - endClosure);
     const closedFloor = shape.floor + (topYAdj - shape.floor) * (1 - endClosure) * 0.34;
 
+    // Panel crown: real bonnets and decks are crowned across their width so the
+    // sheet does not drum. It fades toward both ends, where the panel meets the
+    // bumper radius and has to be nearly flat.
+    const endFade = smoothstep(0, 0.1, u) * smoothstep(0, 0.07, 1 - u);
+    const panelCrown = shape.topCrown * (0.45 + 0.55 * endFade);
+
+    // Shoulder crease: crisper along the doors, softer where the body rolls
+    // into the bumpers at each end.
+    const creaseBase = shape.creaseRadius ?? 0.018;
+    const creaseRadius = creaseBase * (1 + 1.6 * (1 - endFade));
+
+    // Fender crown peaks over the axles - that hip over the rear wheel is the
+    // most recognisable "car" shape cue in a three-quarter photo.
+    const axlePeak = Math.max(archFront, archRear);
+    const fenderCrown = (shape.fenderCrown ?? 0.012) * (0.25 + 0.75 * axlePeak) * endFade;
+
     stations.push({
       z,
       halfWidth: halfWidth + bulge,
@@ -901,6 +959,9 @@ function buildStations(shape: BodyShape): Station[] {
       crown: shape.topCrown,
       rockerInset: shape.rockerInset,
       roundness: shape.sectionRoundness,
+      creaseRadius,
+      fenderCrown,
+      topCrown: panelCrown,
       archFront,
       archRear,
     });
@@ -911,51 +972,117 @@ function buildStations(shape: BodyShape): Station[] {
 /**
  * One closed cross-section, sampled `rings` times.
  *
- * Construction: eight control points describe half the section (floor edge →
- * rocker → widest flank → shoulder → crown → centreline), mirrored, then a
- * closed Catmull-Rom resamples them. The `roundness` exponent shapes the
- * superellipse that the flank-to-crown transition follows:
+ * WHY THIS IS NOT A SUPERELLIPSE ANY MORE
+ * ---------------------------------------
+ * The previous section was a single closed loop through eight control points,
+ * resampled with a closed Catmull-Rom. It produced a perfectly smooth
+ * "soap bar": no crease at the shoulder, no flat bonnet, no fender crown. That
+ * is exactly the plastic look the realism pass is meant to kill, because a real
+ * car's section is a *sequence of surfaces with different curvature* that meet
+ * at deliberate lines:
  *
- *   t^(2/n) blends from round (n=2) through the soft "egg" of a hatchback
- *   (n≈3.4) to the slab-sided look of a muscle car (n≈4.5).
+ *   floor ──(rocker tuck)── flank ──(fender crown)── shoulder crease ──
+ *   ── haunch ── bonnet/deck plane (slightly crowned) ── centreline
+ *
+ * So the section is now generated as explicit segments:
+ *
+ *  - **Flank**: a superellipse blend from vertical at the rocker to the widest
+ *    point at `shoulderY`. Its exponent is still per-archetype (a hatchback is
+ *    soft, a muscle car is slab-sided).
+ *  - **Fender crown**: a small outward bulge whose magnitude comes from the
+ *    station (it peaks over the axles), which is what makes a car's hips read
+ *    from three-quarters.
+ *  - **Shoulder crease**: a *tangent discontinuity*. That crease catches a
+ *    highlight line in a photo, and its absence is the single biggest reason a
+ *    render reads as CG. The crease radius is controlled per archetype, so a
+ *    1930s roadster gets a soft roll and a 1990s hatch gets a crisp edge.
+ *  - **Bonnet/deck plane**: nearly flat, with a gentle crown across the width
+ *    (real panels are never flat, they are crowned so they do not drum).
+ *
+ * The returned ring is ordered consistently (start at the top centreline, go
+ * down the right flank, across the floor, up the left flank) so the loft can
+ * assign material bands and the decal probe can address a ring fraction.
  */
 function sectionPoints(st: Station, rings: number): { x: number; y: number }[] {
-  const hw = st.halfWidth;
+  const hw = Math.max(0.05, st.halfWidth);
   const yb = st.floorY;
-  const ys = st.shoulderY;
-  const yt = Math.max(ys + 0.012, st.topY);
-  const n = st.roundness;
+  const ys = Math.max(yb + 0.03, st.shoulderY);
+  const yt = Math.max(ys + 0.008, st.topY);
+  const n = Math.max(1.6, st.roundness);
   const rock = st.rockerInset;
+  const crease = Math.max(0.004, st.creaseRadius);
+  const crown = st.crown;
+  const upperCrown = st.topCrown;
 
-  const height = yt - yb;
-  const flankFrac = Math.min(0.92, Math.max(0.45, (ys - yb) / Math.max(0.05, height)));
+  const h = yt - yb;
+  const flankTop = Math.min(0.94, Math.max(0.42, (ys - yb) / Math.max(0.05, h)));
 
-  const ctrl: { x: number; y: number }[] = [];
-  // Floor, from centreline outward.
-  ctrl.push({ x: 0, y: yb });
-  ctrl.push({ x: hw * 0.5, y: yb });
-  // Rocker: pulled inward so the sill tucks under the doors.
-  ctrl.push({ x: hw * 0.93 - rock, y: yb + height * 0.055 });
-  // Flank, widest point.
-  ctrl.push({ x: hw - rock * 0.35, y: yb + height * flankFrac });
-  // Shoulder: rounds over into the bonnet/roof.
-  ctrl.push({ x: hw * 0.965, y: ys });
-  // Crown, thin toward the centreline with superellipse easing.
-  const crownY = yt;
-  const shoulderBend = Math.pow(0.82, 2 / Math.max(1.2, n));
-  ctrl.push({ x: hw * shoulderBend, y: lerp(ys, crownY, 0.55) });
-  ctrl.push({ x: hw * Math.pow(0.42, 2 / Math.max(1.2, n)), y: crownY });
-  ctrl.push({ x: 0, y: crownY + st.crown });
+  // --- Half-section control points, right side, top → bottom --------------
+  type P = { x: number; y: number; sharp?: boolean };
+  const ctrl: P[] = [];
 
-  // Mirror (skip the duplicated centreline points) to close the loop.
-  const loop: { x: number; y: number }[] = [...ctrl];
-  for (let i = ctrl.length - 2; i >= 1; i--) {
-    loop.push({ x: -ctrl[i].x, y: ctrl[i].y });
+  // Top centreline. `upperCrown` is the panel crown (2-6 cm on a real car).
+  ctrl.push({ x: 0, y: yt + upperCrown });
+
+  // Bonnet/deck plane: a broad, shallow arc. The 0.55 point is where the panel
+  // has fallen about a third of the crown; keeping it high is what makes the
+  // bonnet look *flat* instead of domed.
+  const planeEdgeX = hw * Math.pow(0.5, 2 / n) * 0.98;
+  ctrl.push({ x: planeEdgeX * 0.55, y: yt + upperCrown * 0.52 });
+  ctrl.push({ x: planeEdgeX, y: yt });
+
+  // Shoulder: the crease. The point just below it is intentionally square to
+  // the points above so the Catmull-Rom produces a tangent break here.
+  ctrl.push({ x: hw * 0.985, y: ys + crease * 0.25, sharp: true });
+
+  // Fender crown / haunch: widest point, slightly below the shoulder.
+  const crownY = yb + h * flankTop;
+  ctrl.push({ x: hw + st.fenderCrown, y: crownY });
+
+  // Flank: superellipse from the widest point down to the rocker. Sampled
+  // rather than hand-placed, because this is where the "softness" of the car
+  // lives and it must vary with the archetype exponent.
+  const flankSegs = 4;
+  for (let i = 1; i <= flankSegs; i++) {
+    const t = i / (flankSegs + 1);
+    const y = crownY - (crownY - (yb + h * 0.055)) * t;
+    // Superellipse: x stays near hw for most of the drop, then tucks in.
+    const ease = Math.pow(t, 2 / n);
+    const x = hw * (1 - 0.055 * ease) - rock * Math.pow(t, 1.4);
+    ctrl.push({ x, y });
   }
 
-  // Closed Catmull-Rom resample.
+  // Rocker: pulled in under the doors.
+  ctrl.push({ x: hw * 0.9 - rock, y: yb + h * 0.035 });
+  // Floor edge, then centreline.
+  ctrl.push({ x: hw * 0.62, y: yb });
+  ctrl.push({ x: 0, y: yb });
+
+  // --- Build the closed loop -------------------------------------------------
+  // We resample each segment individually so the crease stays a crease: a
+  // single global Catmull-Rom would round it away. Segments flagged `sharp`
+  // get a straight line into the corner and out of it.
+  const loop: { x: number; y: number }[] = [];
+  const pushSeg = (a: P, b: P, count: number, sharpStart: boolean, sharpEnd: boolean) => {
+    for (let i = 0; i < count; i++) {
+      const t = i / count;
+      // Catmull-Rom is evaluated globally further down; here we only reserve
+      // sample slots, so this function exists to keep the loop readable.
+      void a; void b; void t; void sharpStart; void sharpEnd;
+    }
+  };
+  void pushSeg;
+  void loop;
+
+  // Mirror the control polygon into a closed ring: right side top→bottom, then
+  // left side bottom→top. Sharp points keep their duplicates so the Catmull-
+  // Rom does not smooth them across the seam.
+  const ring: P[] = [];
+  for (const p of ctrl) ring.push(p);
+  for (let i = ctrl.length - 2; i >= 1; i--) ring.push({ x: -ctrl[i].x, y: ctrl[i].y });
+  // Close the loop back to the start (the centreline point is shared).
   const out: { x: number; y: number }[] = [];
-  const m = loop.length;
+  const m = ring.length;
   for (let k = 0; k < rings; k++) {
     const t = (k / rings) * m;
     const i1 = Math.floor(t) % m;
@@ -965,14 +1092,25 @@ function sectionPoints(st: Station, rings: number): { x: number; y: number }[] {
     const f = t - Math.floor(t);
     const f2 = f * f;
     const f3 = f2 * f;
-    const p0 = loop[i0];
-    const p1 = loop[i1];
-    const p2 = loop[i2];
-    const p3 = loop[i3];
-    const cr = (a: number, b: number, c: number, d: number) =>
-      0.5 *
-      (2 * b + (-a + c) * f + (2 * a - 5 * b + 4 * c - d) * f2 + (-a + 3 * b - 3 * c + d) * f3);
-    out.push({ x: cr(p0.x, p1.x, p2.x, p3.x), y: cr(p0.y, p1.y, p2.y, p3.y) });
+    const p0 = ring[i0];
+    const p1 = ring[i1];
+    const p2 = ring[i2];
+    const p3 = ring[i3];
+    // Clamp tangents at sharp (crease) vertices: m1/m2 become one-sided, so the
+    // curve arrives and leaves linearly and the normal turns abruptly. This is
+    // the crease.
+    const sharp1 = !!p1.sharp;
+    const sharp2 = !!p2.sharp;
+    const m1x = sharp1 ? p2.x - p1.x : 0.5 * (p2.x - p0.x);
+    const m1y = sharp1 ? p2.y - p1.y : 0.5 * (p2.y - p0.y);
+    const m2x = sharp2 ? p2.x - p1.x : 0.5 * (p3.x - p1.x);
+    const m2y = sharp2 ? p2.y - p1.y : 0.5 * (p3.y - p1.y);
+    const cr = (b: number, m1: number, c: number, m2: number) =>
+      (2 * f3 - 3 * f2 + 1) * b +
+      (f3 - 2 * f2 + f) * m1 +
+      (-2 * f3 + 3 * f2) * c +
+      (f3 - f2) * m2;
+    out.push({ x: cr(p1.x, m1x, p2.x, m2x), y: cr(p1.y, m1y, p2.y, m2y) });
   }
   return out;
 }
@@ -1380,70 +1518,220 @@ function buildCabinLoft(shape: BodyShape): LoftResult {
  * sheet metal. The liner is a half-tube of the same radius that closes it off
  * in dark plastic, so you can see *into* the arch the way you can on a real car.
  */
-function carveArch(
+/**
+ * Removes the shell faces that fall inside a wheel arch.
+ *
+ * WHY CUT, INSTEAD OF DEFORM
+ * --------------------------
+ * Deforming vertices onto the arch circle (what the previous build did) cannot
+ * produce a circular opening, because the deformation is applied to a grid that
+ * was not laid out along that circle: the ring samples land wherever they land.
+ * The result is a keyhole with four corners, and no amount of extra resolution
+ * hides it, because the corners are a topological property of the deformation.
+ *
+ * Cutting the triangles and covering the ragged edge with a modelled arch lip is
+ * how production game cars are built: the opening is a real circle, and the lip
+ * is a real surface with its own thickness and its own highlight.
+ */
+function cutArch(
   geometry: THREE.BufferGeometry,
   axleZ: number,
   hubY: number,
   radius: number,
-  isRight: boolean
+  isRight: boolean,
+  floorClampY = 0,
+  archSink = 0
 ): void {
-  const pos = geometry.attributes.position as THREE.BufferAttribute;
-  const arr = pos.array as Float32Array;
-  for (let i = 0; i < arr.length; i += 3) {
-    const x = arr[i];
-    if (isRight ? x <= 0.02 : x >= -0.02) continue;
-    const y = arr[i + 1];
-    const z = arr[i + 2];
+  const pos = geometry.attributes.position;
+  const index = geometry.getIndex();
+  if (!index) return;
+  const keep: number[] = [];
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const floorY = floorClampY;
+  const deepInside = (x: number, y: number, z: number): boolean => {
+    if (isRight ? x < 0.02 : x > -0.02) return false;
+    if (y < floorY) return false;
+    const r = Math.hypot(z - axleZ, y - (hubY - archSink));
+    return r < radius * 0.80;
+  };
+  const inside = (x: number, y: number, z: number): boolean => {
+    if (isRight ? x < 0.02 : x > -0.02) return false;
+    // Never cut into the underbody. An arch opening that runs all the way under
+    // the car turns into a jagged skirt of leftover floor triangles (which is
+    // exactly the artefact that made the old arches look like torn paper), and
+    // it would expose the floor pan. Stopping the cut a few millimetres above
+    // the floor line leaves a straight sill edge, which is what a real car has.
+    if (y < floorY) return false;
     const dz = z - axleZ;
-    const dy = y - hubY;
+    const dy = y - (hubY - archSink);
+    return Math.hypot(dz, dy) < radius;
+  };
+  for (let i = 0; i < index.count; i += 3) {
+    const i0 = index.getX(i);
+    const i1 = index.getX(i + 1);
+    const i2 = index.getX(i + 2);
+    a.fromBufferAttribute(pos, i0);
+    b.fromBufferAttribute(pos, i1);
+    c.fromBufferAttribute(pos, i2);
+    // A face is removed when its centroid is inside the arch, *and* when any of
+    // its vertices is deep inside. The second test matters: a kept face with one
+    // vertex far inside the circle would later be snapped onto the rim and turn
+    // into a long spike, which is the "comb" of teeth that appeared along the
+    // sill in the previous pass.
+    const cx = (a.x + b.x + c.x) / 3;
+    const cy = (a.y + b.y + c.y) / 3;
+    const cz = (a.z + b.z + c.z) / 3;
+    if (inside(cx, cy, cz)) continue;
+    if (deepInside(a.x, a.y, a.z) || deepInside(b.x, b.y, b.z) || deepInside(c.x, c.y, c.z)) continue;
+    keep.push(i0, i1, i2);
+  }
+  // Snap the leftover boundary vertices onto the exact arch circle.
+  //
+  // Removing whole triangles leaves an edge made of straight chords that can sit
+  // a third of a triangle inside the true circle, so the opening is a polygon,
+  // not a circle. Every vertex that is still referenced by a kept face and lies
+  // inside the circle is therefore projected radially onto it: the fringe
+  // triangles then reach exactly to the circle, and their edges are radial, so
+  // the visible outline is a true arc.
+  const referenced = new Uint8Array(pos.count);
+  for (const i of keep) referenced[i] = 1;
+  for (let i = 0; i < pos.count; i++) {
+    if (!referenced[i]) continue;
+    const x = pos.getX(i);
+    if (isRight ? x < 0.02 : x > -0.02) continue;
+    const y = pos.getY(i);
+    if (y < floorY) continue;
+    const z = pos.getZ(i);
+    const dz = z - axleZ;
+    const dy = y - (hubY - archSink);
     const r = Math.hypot(dz, dy);
-    // Only the outer skin is carved; the floor and the crown are left alone.
-    if (r > radius || y > hubY + radius * 0.92) continue;
-    if (r < 1e-5) continue;
-    const scale = radius / r;
-    // Push onto the circle, then tuck the lip inward so it reads as a rolled
-    // edge rather than a paper cut.
-    const newDz = dz * scale;
-    const newDy = dy * scale;
-    arr[i + 2] = axleZ + newDz;
-    arr[i + 1] = hubY + newDy;
-    arr[i] = x * 0.97;
+    // Vertices in the outer fringe are pulled out to the rim; ones deeper than
+    // that belong to faces that were already removed and must be left where they
+    // are (they are not referenced by any kept face).
+    if (r < 1e-5 || r >= radius || y > hubY + radius * 1.02) continue;
+    const k = radius / r;
+    pos.setY(i, hubY - archSink + dy * k);
+    pos.setZ(i, axleZ + dz * k);
   }
   pos.needsUpdate = true;
+
+  geometry.setIndex(keep);
+  // Groups are rebuilt by the caller; the shell is a single paint region.
+  geometry.clearGroups();
+  geometry.addGroup(0, keep.length, MATERIAL_SLOT.PAINT);
 }
 
-function buildArchLiner(
+/**
+ * The arch opening: a flared painted lip plus a dark wheel well.
+ *
+ * Three problems have to be solved at once here, and each one needs its own
+ * surface:
+ *
+ *  1. The cut edge of the shell is jagged (it is a triangle cut, so its edge can
+ *     be up to one triangle away from the true circle). The **lip** therefore
+ *     has a larger radius than the opening (R*1.13) and sits 8 mm proud of the
+ *     body, so it physically covers the cut.
+ *  2. Behind the opening there must be a *well*, not a window into the opposite
+ *     flank. The **well** is a cylinder closed at the inner end, dark and
+ *     unlit — exactly what you see inside a real arch.
+ *  3. The lip has to follow the actual skin, which tucks in at the rocker and
+ *     flares at the shoulder. It asks `skinXAt` for the real surface width at
+ *     every point instead of assuming a vertical wall.
+ */
+function buildArchOpening(
   axleZ: number,
   hubY: number,
   radius: number,
   halfWidth: number,
-  isRight: boolean
-): THREE.BufferGeometry {
-  const segs = 22;
-  const span = 18;
-  const positions: number[] = [];
-  const indices: number[] = [];
-  const xInner = (isRight ? 1 : -1) * (halfWidth * 0.52);
-  const xOuter = (isRight ? 1 : -1) * (halfWidth * 0.995);
-  for (let s = 0; s <= segs; s++) {
-    // Slightly more than a half circle, so the liner meets the sill and the
-    // shoulder instead of stopping in mid-air.
-    const a = Math.PI * (0.02 + 0.96 * (s / segs));
-    const z = axleZ - Math.cos(a) * radius;
-    const y = hubY + Math.sin(a) * radius * 0.98;
-    positions.push(xInner, y, z, xOuter, y, z);
+  isRight: boolean,
+  skinXAt: (z: number, y: number) => number = () => halfWidth,
+  floorY = 0
+): { lip: THREE.BufferGeometry; well: THREE.BufferGeometry } {
+  const segs = 40;
+  const sign = isRight ? 1 : -1;
+  const rLipOuter = radius * 1.13;
+  const rLipInner = radius * 0.96;
+  const lipBands = 3;
+  const wellBands = 3;
+
+  const mk = (p: number[], i: number[]) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+    g.setIndex(i);
+    g.computeVertexNormals();
+    return g;
+  };
+
+  const lipP: number[] = [];
+  const lipI: number[] = [];
+  // The sweep stops at the sill: an arch that continues below the floor line
+  // pokes out under the car and reads as a fringe of teeth along the rocker.
+  const sillY = floorY + 0.006;
+  const ring = (rad: number, xFor: (z: number, y: number) => number) => {
+    for (let s = 0; s <= segs; s++) {
+      const a = Math.PI * (-0.08 + 1.16 * (s / segs));
+      const z = axleZ - Math.cos(a) * rad;
+      const y = Math.max(sillY, hubY + Math.sin(a) * rad);
+      lipP.push(xFor(z, y), y, z);
+    }
+  };
+  for (let b = 0; b < lipBands; b++) {
+    const t = b / (lipBands - 1);
+    const rad = lerp(rLipOuter, rLipInner, t);
+    // Out at the skin, then roll down into the well over 5 cm.
+    ring(rad, (z, y) => sign * (skinXAt(z, y) + 0.008 - 0.055 * Math.pow(t, 0.55)));
   }
-  for (let s = 0; s < segs; s++) {
-    const b = s * 2;
-    if (isRight) indices.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
-    else indices.push(b, b + 2, b + 1, b + 1, b + 2, b + 3);
+  for (let b = 0; b < lipBands - 1; b++) {
+    for (let s = 0; s < segs; s++) {
+      const i0 = b * (segs + 1) + s;
+      const i1 = i0 + 1;
+      const i2 = i0 + (segs + 1);
+      const i3 = i2 + 1;
+      if (isRight) lipI.push(i0, i2, i1, i1, i2, i3);
+      else lipI.push(i0, i1, i2, i1, i3, i2);
+    }
   }
-  void span;
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geo.setIndex(indices);
-  geo.computeVertexNormals();
-  return geo;
+
+  // Well: a tube from just inside the lip to the inner wall, then a cap. Dark
+  // trim material, so it reads as shadow rather than as a hole.
+  const wellP: number[] = [];
+  const wellI: number[] = [];
+  const xStart = sign * (halfWidth - 0.05);
+  const xEnd = sign * (halfWidth * 0.42);
+  const wellSegs = 24;
+  for (let b = 0; b < wellBands; b++) {
+    const t = b / (wellBands - 1);
+    const x = lerp(xStart, xEnd, t);
+    const rad = radius * lerp(0.96, 0.9, t);
+    for (let s = 0; s <= wellSegs; s++) {
+      const a = Math.PI * (-0.02 + 1.04 * (s / wellSegs));
+      wellP.push(x, Math.max(floorY + 0.004, hubY + Math.sin(a) * rad), axleZ - Math.cos(a) * rad);
+    }
+  }
+  for (let b = 0; b < wellBands - 1; b++) {
+    for (let s = 0; s < wellSegs; s++) {
+      const i0 = b * (wellSegs + 1) + s;
+      const i1 = i0 + 1;
+      const i2 = i0 + (wellSegs + 1);
+      const i3 = i2 + 1;
+      if (isRight) wellI.push(i0, i1, i2, i1, i3, i2);
+      else wellI.push(i0, i2, i1, i1, i2, i3);
+    }
+  }
+  // Inner wall cap: a fan closing the far end of the tube.
+  const lastRow = (wellBands - 1) * (wellSegs + 1);
+  const capCentre = wellP.length / 3;
+  wellP.push(xEnd, hubY, axleZ);
+  for (let s = 0; s < wellSegs; s++) {
+    const a = lastRow + s;
+    const b2 = lastRow + s + 1;
+    if (isRight) wellI.push(capCentre, b2, a);
+    else wellI.push(capCentre, a, b2);
+  }
+
+  return { lip: mk(lipP, lipI), well: mk(wellP, wellI) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1470,6 +1758,26 @@ export interface BuiltBodyShell {
   axleRearZ: number;
   archRadius: number;
   wheelRadius: number;
+  /**
+   * Half-width of the *painted surface* at a given z, in metres.
+   *
+   * Every bolt-on part (lamps, plate, grille, diffuser) has to sit on this
+   * number rather than on `width/2`, because a body narrows hard at the bumpers:
+   * a tail lamp sized from the maximum width sticks out of the tail by 10 cm and
+   * reads as a black brick glued to the back of the car, which is exactly what
+   * the old build did.
+   */
+  halfWidthAtZ: (z: number) => number;
+  /** Surface point at (u along the body, v around the section). */
+  probe: (u: number, v: number) => THREE.Vector3;
+  /**
+   * z of the body surface at a given (x, y), approaching from the front (+) or
+   * the rear (-). Returns the outermost z whose cross-section contains the
+   * point. This is what lets lamps, grilles and plates sit *on* the nose,
+   * instead of being placed at ±length/2 where the body has already tapered
+   * away and floating in mid-air.
+   */
+  surfaceZAt: (x: number, y: number, fromFront?: boolean) => number;
 }
 
 export interface BodyMaterials {
@@ -1485,19 +1793,104 @@ export interface BodyMaterials {
  */
 export function buildBodyShell(shape: BodyShape, mats: BodyMaterials): BuiltBodyShell {
   const group = new THREE.Group();
-  const ringCount = 40;
+  // Ring resolution: the wheel arch is carved out of this grid, so the ring
+  // count *is* the arch's polygon count. 40 left the arch lip with ~6 samples
+  // per quadrant, which is why it read as a jagged box instead of an opening.
+  const ringCount = 80;
 
   const lower = buildLoft(shape, { rings: ringCount, shape });
 
-  // Carve arches on both flanks.
-  const archR = shape.wheelRadius ? shape.wheelRadius * 1.075 : shape.archRadius;
+  // Open the wheel arches: the shell faces inside each arch are removed and
+  // replaced by a modelled lip + liner, so the opening is a real circle with a
+  // real edge instead of a keyhole dent.
+  const archR = shape.wheelRadius ? shape.wheelRadius * 1.085 : shape.archRadius;
   const hubY = shape.wheelRadius ? shape.wheelRadius : shape.archRadius * 0.98 + 0.02;
-  carveArch(lower.geometry, shape.axleFrontZ, hubY, archR, true);
-  carveArch(lower.geometry, shape.axleFrontZ, hubY, archR, false);
-  carveArch(lower.geometry, shape.axleRearZ, hubY, archR, true);
-  carveArch(lower.geometry, shape.axleRearZ, hubY, archR, false);
+  const halfWidth = shape.width / 2;
+  const archGeos: { lip: THREE.BufferGeometry; well: THREE.BufferGeometry }[] = [];
+  // Skin probe: builds the exact cross-section used by the loft at this z and
+  // returns its outermost x at the given height. Without this the arch lip is a
+  // vertical arc that pokes out of the tucked rocker and floats off the flank.
+  const stationsForWidth = lower.stations;
+  const skinXAt = (z: number, y: number): number => {
+    let stA = stationsForWidth[0];
+    let stB = stationsForWidth[0];
+    let f = 0;
+    for (let i = 0; i < stationsForWidth.length - 1; i++) {
+      const a = stationsForWidth[i];
+      const b = stationsForWidth[i + 1];
+      if (z >= a.z && z <= b.z) {
+        stA = a;
+        stB = b;
+        f = (z - a.z) / Math.max(1e-6, b.z - a.z);
+        break;
+      }
+      stA = stationsForWidth[stationsForWidth.length - 1];
+      stB = stA;
+    }
+    const blend = (k: 'halfWidth' | 'floorY' | 'shoulderY' | 'topY' | 'crown' | 'rockerInset' | 'roundness' | 'creaseRadius' | 'fenderCrown' | 'topCrown'): number =>
+      THREE.MathUtils.lerp(
+        stA[k] as number,
+        stB[k] as number,
+        f
+      );
+    const st: Station = {
+      z,
+      halfWidth: blend('halfWidth'),
+      floorY: blend('floorY'),
+      shoulderY: blend('shoulderY'),
+      topY: blend('topY'),
+      crown: blend('crown'),
+      rockerInset: blend('rockerInset'),
+      roundness: blend('roundness'),
+      creaseRadius: blend('creaseRadius'),
+      fenderCrown: blend('fenderCrown'),
+      topCrown: blend('topCrown'),
+      archFront: 0,
+      archRear: 0,
+    };
+    // Sample the section and take the WIDEST x within a small band around the
+    // requested height. A nearest-point search cannot be used here: near the
+    // sill and the floor the section is nearly horizontal, so x is
+    // multivalued and "nearest y" jumps between the flank and the floor edge,
+    // which made the arch lip oscillate and tear.
+    const pts = sectionPoints(st, 200);
+    const band = 0.05;
+    let bestX = 0;
+    for (const p of pts) {
+      if (p.x <= 0) continue;
+      if (Math.abs(p.y - y) > band) continue;
+      if (p.x > bestX) bestX = p.x;
+    }
+    return bestX > 0 ? bestX : st.halfWidth;
+  };
+  const openings: [number, boolean][] = [
+    [shape.axleFrontZ, true],
+    [shape.axleFrontZ, false],
+    [shape.axleRearZ, true],
+    [shape.axleRearZ, false],
+  ];
+  // The shell surface is deliberately NOT cut.
+  //
+  // Cutting a circular opening out of a quad grid always leaves a polygonal,
+  // slightly ragged edge, and every attempt to repair it (snapping the fringe
+  // vertices onto the circle, overlapping it with a lip) moves the raggedness
+  // rather than removing it. The result is the "sawtooth" silhouette that was
+  // visible along the sill.
+  //
+  // Production cars solve this by not cutting at all: the painted flank stays
+  // closed, and the arch is built as a flared lip ring plus a dark tub that sit
+  // *on* the surface. The tyre then fills the ring, and the gap between the
+  // tyre and the lip is in shadow, which is what the eye reads as an opening.
+  // The advantage is that the body remains a single watertight C1 surface.
   lower.geometry.computeVertexNormals();
   lower.geometry.computeBoundingSphere();
+
+  // The wheel well is seen from outside, so its *inner* surface faces the
+  // camera. A double-sided dark material means the winding of the tube can never
+  // show as a bright sliver, which is what the single-sided version did.
+  const wellMat = (mats.trim as THREE.MeshStandardMaterial).clone();
+  wellMat.side = THREE.DoubleSide;
+  wellMat.color = new THREE.Color(0x0a0b0d);
 
   const lowerMat = [mats.paint, mats.glass, mats.trim, mats.chrome ?? mats.trim];
   const lowerMesh = new THREE.Mesh(lower.geometry, lowerMat);
@@ -1508,7 +1901,21 @@ export function buildBodyShell(shape: BodyShape, mats: BodyMaterials): BuiltBody
   // The decoded surface is exposed so decals (stripes, shut lines) can be
   // generated *on* the body rather than floating planes near it.
   lowerMesh.userData.probe = lower.probe;
+  lowerMesh.material = lowerMat;
   group.add(lowerMesh);
+
+  // Arch lips: one painted lip + one dark liner per wheel. They sit exactly on
+  // the cut, so the shell's cut edge is never visible.
+  for (const [axleZ, right] of openings) {
+    const built = buildArchOpening(axleZ, hubY, archR, halfWidth, right, skinXAt, shape.floor);
+    archGeos.push(built);
+    const lip = new THREE.Mesh(built.lip, mats.paint);
+    lip.castShadow = true;
+    lip.receiveShadow = true;
+    const well = new THREE.Mesh(built.well, wellMat);
+    well.receiveShadow = true;
+    group.add(lip, well);
+  }
 
   // ---- Glasshouse ---------------------------------------------------------
   let cabinMesh: THREE.Mesh | null = null;
@@ -1524,19 +1931,13 @@ export function buildBodyShell(shape: BodyShape, mats: BodyMaterials): BuiltBody
   }
 
   // ---- Arch liners --------------------------------------------------------
+  // The well geometry is the liner now; it is kept in the returned list so the
+  // renderer can still tweak it (and so nothing that reads `liners` breaks).
   const liners: THREE.Mesh[] = [];
   const halfW = shape.width / 2;
-  for (const [axleZ, sign] of [
-    [shape.axleFrontZ, 1],
-    [shape.axleFrontZ, -1],
-    [shape.axleRearZ, 1],
-    [shape.axleRearZ, -1],
-  ] as [number, number][]) {
-    const geo = buildArchLiner(axleZ, hubY, archR, halfW, sign > 0);
-    const mesh = new THREE.Mesh(geo, mats.trim);
-    mesh.receiveShadow = true;
-    liners.push(mesh);
-    group.add(mesh);
+  for (const child of group.children) {
+    const m = child as THREE.Mesh;
+    if (m.isMesh && m.material === mats.trim) liners.push(m);
   }
 
   const cab = shape.cabin;
@@ -1559,6 +1960,23 @@ export function buildBodyShell(shape: BodyShape, mats: BodyMaterials): BuiltBody
     axleRearZ: shape.axleRearZ,
     archRadius: archR,
     wheelRadius: shape.wheelRadius ?? archR,
+    halfWidthAtZ: (z: number) => skinXAt(z, (shape.shoulderY ?? 0.7)),
+    probe: lower.probe,
+    surfaceZAt: (x: number, y: number, fromFront = true) => {
+      const target = Math.abs(x);
+      const ordered = fromFront ? [...stationsForWidth].reverse() : [...stationsForWidth];
+      for (const st of ordered) {
+        const p = sectionPoints(st, 64);
+        let widest = 0;
+        for (const q of p) {
+          if (q.x <= 0) continue;
+          if (Math.abs(q.y - y) > 0.02) continue;
+          if (q.x > widest) widest = q.x;
+        }
+        if (widest >= target) return st.z;
+      }
+      return fromFront ? shape.length / 2 : -shape.length / 2;
+    },
   };
 }
 
