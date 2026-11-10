@@ -16,7 +16,8 @@ import {
 import { AssistMode, computeEffectiveCarStats } from './PacejkaPhysics';
 import { VehicleDynamicsBody } from './VehicleDynamics';
 import { buildCarMesh, BuiltCarRig } from '../cars/CarMeshBuilder';
-import { buildGarageShowroom, buildTrackWorld, BuiltTrackWorld } from '../tracks/TrackBuilder';
+import { buildTrackWorld, BuiltTrackWorld } from '../tracks/TrackBuilder';
+import { buildGarageShowroomV2 } from '../tracks/GarageStudio';
 import { CAR_CATALOG, createDefaultTuneForCar } from '../data/carCatalog';
 import { BOT_ROSTER } from '../data/botRoster';
 import { WEATHER_PRESETS } from '../data/weatherCatalog';
@@ -98,15 +99,21 @@ export class VelocityEngine {
   // Garage Objects
   private garageTurntable: THREE.Group | null = null;
   private garageRig: BuiltCarRig | null = null;
-  private garageOrbitYaw = 0.55;
-  private garageOrbitPitch = 0.24;
-  private garageZoomDist = 5.4;
+  private garageOrbitYaw = 0.62;
+  private garageOrbitPitch = 0.2;
+  // 12.5 m out and 1.9 m up: the whole car in frame with air above the roof.
+  // The old 5.4 m orbit put the camera inside the greenhouse, which is why the
+  // showroom read as a dashboard shot.
+  private garageZoomDist = 9.4;
+  private garageFraming = { minDist: 6.6, maxDist: 19, defaultDist: 9.4, targetY: 0.62 };
   private garageDoorsOpen = false;
   private garageHoodOpen = false;
   private garageTrunkOpen = false;
   private garageCfdVisible = false;
   private garageSpotIntensity = 48;
+  private garageSkyScratch: THREE.Vector3 | null = null;
   private garageSpots: THREE.SpotLight[] = [];
+  private garageFillLights: THREE.Light[] = [];
   private isDraggingOrbit = false;
   private lastPointerX = 0;
   private lastPointerY = 0;
@@ -254,7 +261,7 @@ export class VelocityEngine {
 
       if (this.sceneMode === 'garage') {
         this.garageOrbitYaw -= dx * 0.007;
-        this.garageOrbitPitch = THREE.MathUtils.clamp(this.garageOrbitPitch + dy * 0.005, 0.04, 1.15);
+        this.garageOrbitPitch = THREE.MathUtils.clamp(this.garageOrbitPitch + dy * 0.005, 0.02, 0.42);
       } else if (this.photoModeActive) {
         this.photoOrbitYaw -= dx * 0.007;
         this.photoOrbitPitch = THREE.MathUtils.clamp(this.photoOrbitPitch + dy * 0.005, -0.1, 1.35);
@@ -264,7 +271,11 @@ export class VelocityEngine {
       'wheel',
       (e) => {
         if (this.sceneMode === 'garage') {
-          this.garageZoomDist = THREE.MathUtils.clamp(this.garageZoomDist + e.deltaY * 0.004, 1.45, 11.5);
+          this.garageZoomDist = THREE.MathUtils.clamp(
+            this.garageZoomDist + e.deltaY * 0.006,
+            this.garageFraming.minDist,
+            this.garageFraming.maxDist
+          );
         } else if (this.photoModeActive) {
           this.photoDist = THREE.MathUtils.clamp(this.photoDist + e.deltaY * 0.006, 2.0, 35.0);
         }
@@ -365,18 +376,33 @@ export class VelocityEngine {
     audioEngine.configureCar(params.car, params.tune);
 
     this.clearDynamicScene();
-    this.scene.background = new THREE.Color(params.garageTier === 3 ? 0x070a14 : 0x10141d);
-    this.scene.fog = new THREE.FogExp2(0x0b0e17, 0.025);
-    this.hemiLight.intensity = 0.7;
-    this.sunLight.intensity = 0.6;
+    // No coloured void behind the wall: the hall encloses the shot, and fog is
+    // only a whisper so the far wall does not dissolve into the background.
+    this.scene.background = null;
+    this.scene.fog = new THREE.FogExp2(0x1a2029, 0.0075);
+    this.hemiLight.intensity = 0.0;
+    this.sunLight.intensity = 0.0;
 
-    const built = buildGarageShowroom(params.garageTier, params.trophyCount, params.posters);
+    const built = buildGarageShowroomV2(params.garageTier, params.trophyCount, params.posters);
     this.scene.add(built.group);
     this.garageTurntable = built.turntable;
     this.garageSpots = built.spotLights;
+    this.garageFillLights = built.fillLights;
+    this.garageFraming = built.framing;
+    this.garageZoomDist = THREE.MathUtils.clamp(
+      this.garageZoomDist,
+      built.framing.minDist,
+      built.framing.maxDist
+    );
+
+    // Indoor air: a neutral bounce so the hall reads as a lit room, and a very
+    // light fog so the far wall sits back without dissolving.
+    this.realism.setSkyOverride({ zenith: 0x2c3440, horizon: 0x6b7482, sun: 0xdfe8f5, sunIntensity: 0.55 });
+    this.realism.setFogOverride({ color: 0x1b222b, density: 0.009 });
 
     this.garageRig = buildCarMesh(params.car, params.tune);
-    this.garageRig.root.position.y = 0.14;
+    // Sits on the 11 cm plinth, so the tyres touch its top surface.
+    this.garageRig.root.position.y = 0.115;
     this.garageTurntable.add(this.garageRig.root);
 
     // Mercedes 300SL Gullwing automatic door presentation Easter Egg!
@@ -397,8 +423,18 @@ export class VelocityEngine {
     if (opts.trunkOpen !== undefined) this.garageTrunkOpen = opts.trunkOpen;
     if (opts.cfdVisible !== undefined) this.garageCfdVisible = opts.cfdVisible;
     if (opts.spotIntensity !== undefined) {
+      // The slider is a dimmer in watts over the studio rig: scale from its
+      // built-in intensities so the lighting keeps its designed ratios instead
+      // of every light jumping to the same raw number.
       this.garageSpotIntensity = opts.spotIntensity;
-      this.garageSpots.forEach((s) => (s.intensity = opts.spotIntensity!));
+      const k = opts.spotIntensity / 48;
+      this.garageSpots.forEach((s, i) => {
+        const base = [60, 46, 30][i] ?? 40;
+        s.intensity = base * k;
+      });
+      this.garageFillLights.forEach((l) => {
+        l.intensity = (l instanceof THREE.HemisphereLight ? 0.45 : 8) * Math.max(0.15, k);
+      });
     }
   }
 
@@ -433,6 +469,8 @@ export class VelocityEngine {
     this.photoModeActive = false;
     this.raceFinished = false;
 
+    this.realism.setSkyOverride(null);
+    this.realism.setFogOverride(null);
     this.currentCar = config.car;
     this.currentTune = config.tune;
     this.currentTrack = config.track;
@@ -1034,13 +1072,17 @@ export class VelocityEngine {
       engineDamaged: false,
     });
 
-    const cx = Math.sin(this.garageOrbitYaw) * Math.cos(this.garageOrbitPitch) * this.garageZoomDist;
-    const cy = Math.sin(this.garageOrbitPitch) * this.garageZoomDist + 0.75;
-    const cz = Math.cos(this.garageOrbitYaw) * Math.cos(this.garageOrbitPitch) * this.garageZoomDist;
-    this.camera.fov = 50;
+    // Orbit around the car, never through it. The pitch is clamped low enough
+    // that the camera cannot rise over the roof and look down into the cabin.
+    const targetY = this.garageFraming.targetY;
+    const dist = this.garageZoomDist;
+    const cx = Math.sin(this.garageOrbitYaw) * Math.cos(this.garageOrbitPitch) * dist;
+    const cy = Math.sin(this.garageOrbitPitch) * dist + 0.95;
+    const cz = Math.cos(this.garageOrbitYaw) * Math.cos(this.garageOrbitPitch) * dist;
+    this.camera.fov = 46;
     this.camera.updateProjectionMatrix();
     this.camera.position.set(cx, cy, cz);
-    this.camera.lookAt(0, 0.65, 0);
+    this.camera.lookAt(0, targetY, 0);
   }
 
   private stepRace(dt: number): void {

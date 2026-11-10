@@ -573,6 +573,10 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   const beltY = shape.cabin ? shape.cabin.beltY : shape.shoulderY;
   const seatY = shape.floor + 0.06;
 
+  // NOTE: the cockpit group is placed at the cabin centre, so every child uses
+  // *body-space* z. The previous build subtracted the cabin centre a second
+  // time on every dash/steering/console part, which pushed the whole dashboard
+  // onto the bonnet and left the interior empty on every car in the catalog.
   const cockpitGroup = new THREE.Group();
   cockpitGroup.position.set(0, 0, cabinCentreZ);
   chassisGroup.add(cockpitGroup);
@@ -603,18 +607,18 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
 
   // Dashboard: a full-width slab that curves down at the ends, plus a binnacle.
   const dash = new THREE.Mesh(roundedSlab(shape.width * 0.8, 0.2, 0.34, 0.06, 8), dashMat);
-  dash.position.set(0, beltY - 0.16, cabinFrontZ - cabinCentreZ - 0.16);
+  dash.position.set(0, beltY - 0.16, cabinFrontZ - 0.16);
   dash.rotation.x = -0.12;
   cockpitGroup.add(dash);
 
   const binnacle = new THREE.Mesh(roundedSlab(0.34, 0.12, 0.14, 0.045, 8), dashMat);
-  binnacle.position.set(-shape.width * 0.2, beltY - 0.03, cabinFrontZ - cabinCentreZ - 0.08);
+  binnacle.position.set(-shape.width * 0.2, beltY - 0.03, cabinFrontZ - 0.08);
   cockpitGroup.add(binnacle);
 
   // Gauge cluster: three round dials, not a glowing rectangle. Each is a lathe
   // bezel with an emissive face — this is what the camera sees from the cockpit.
   const clusterGroup = new THREE.Group();
-  clusterGroup.position.set(-shape.width * 0.2, beltY - 0.02, cabinFrontZ - cabinCentreZ - 0.15);
+  clusterGroup.position.set(-shape.width * 0.2, beltY - 0.02, cabinFrontZ - 0.15);
   const bezelMat = new THREE.MeshStandardMaterial({ color: 0x0d0f12, roughness: 0.55, metalness: 0.4 });
   const faceMat = new THREE.MeshStandardMaterial({
     color: 0x0a0c10,
@@ -635,7 +639,7 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
 
   // Steering wheel: a rim with a real cross-section, three spokes, and a column.
   const steeringWheelMesh = new THREE.Group();
-  steeringWheelMesh.position.set(-shape.width * 0.19, beltY - 0.12, cabinFrontZ - cabinCentreZ - 0.02);
+  steeringWheelMesh.position.set(-shape.width * 0.19, beltY - 0.12, cabinFrontZ - 0.02);
   steeringWheelMesh.rotation.x = -0.42;
   const rimProfilePts: THREE.Vector2[] = [
     new THREE.Vector2(0.152, 0),
@@ -677,31 +681,31 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   // Column.
   const column = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.034, 0.22, 12), dashMat);
   column.rotation.x = Math.PI / 2 + 0.42;
-  column.position.set(-shape.width * 0.19, beltY - 0.15, cabinFrontZ - cabinCentreZ - 0.13);
+  column.position.set(-shape.width * 0.19, beltY - 0.15, cabinFrontZ - 0.13);
   cockpitGroup.add(column);
 
   // Centre console with a gear lever and a handbrake — small, but they are what
   // you see once the camera is inside.
   const console3d = new THREE.Mesh(roundedSlab(0.2, 0.14, 0.62, 0.04, 6), dashMat);
-  console3d.position.set(0, seatY + 0.05, cabinFrontZ - cabinCentreZ - 0.3);
+  console3d.position.set(0, seatY + 0.05, cabinFrontZ - 0.3);
   cockpitGroup.add(console3d);
   const gearLever = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.014, 0.16, 8), spokeMat);
-  gearLever.position.set(0, seatY + 0.16, cabinFrontZ - cabinCentreZ - 0.24);
+  gearLever.position.set(0, seatY + 0.16, cabinFrontZ - 0.24);
   cockpitGroup.add(gearLever);
   const gearKnob = new THREE.Mesh(new THREE.SphereGeometry(0.026, 12, 10), leatherMat);
-  gearKnob.position.set(0, seatY + 0.25, cabinFrontZ - cabinCentreZ - 0.24);
+  gearKnob.position.set(0, seatY + 0.25, cabinFrontZ - 0.24);
   cockpitGroup.add(gearKnob);
 
   // Mirror: the inside mirror hangs from the header.
   const rearViewMirror = new THREE.Mesh(roundedSlab(0.24, 0.075, 0.03, 0.014, 6), dashMat);
-  rearViewMirror.position.set(0, beltY + 0.34, cabinFrontZ - cabinCentreZ + 0.02);
+  rearViewMirror.position.set(0, beltY + 0.34, cabinFrontZ + 0.02);
   cockpitGroup.add(rearViewMirror);
 
   // ---- Cheirinho de Pinho (kept — it is the game's signature) -------------
   let pineTreePivot: THREE.Group | null = null;
   if (tune.pineAirFreshener) {
     pineTreePivot = new THREE.Group();
-    pineTreePivot.position.set(0, beltY + 0.36, cabinFrontZ - cabinCentreZ + 0.08);
+    pineTreePivot.position.set(0, beltY + 0.36, cabinFrontZ + 0.08);
     const treeShape = new THREE.Shape();
     // A real pine-tree freshener silhouette: notched edges.
     treeShape.moveTo(0, 0.075);
