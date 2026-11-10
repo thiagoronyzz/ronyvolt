@@ -224,10 +224,46 @@ export class VehicleDynamicsBody {
     this.lastAy = 0;
   }
 
+  /**
+   * Zero every velocity state, including the internal body-frame state
+   * (u / vLat / yaw rate) that `recoverCarToTrack` used to leave behind —
+   * the car kept its speed after an "R" reset because only vx/vz were cleared.
+   */
+  public resetVelocity(): void {
+    this.vx = 0;
+    this.vz = 0;
+    this.vy = 0;
+    this.u = 0;
+    this.vLat = 0;
+    this.angularVelYaw = 0;
+    this.pitchRad = 0;
+    this.rollRad = 0;
+    this.wheelOmega = [0, 0, 0, 0];
+    this.wheelLocked = [false, false, false, false];
+    this.accumulator = 0;
+    this.lastAx = 0;
+    this.lastAy = 0;
+  }
+
   public applyImpact(relSpeedKmh: number, localSide: 'front' | 'left' | 'right' | 'rear', damageEnabled: boolean): void {
     if (!damageEnabled || relSpeedKmh < 12) return;
     const norm = Math.min(1, (relSpeedKmh - 10) / 140);
+
+    // The panel damage below is cosmetic; the *car* also has to lose the energy
+    // the barrier absorbed. Without this the body kept its forward speed after a
+    // 180 km/h wall hit and the guardrail had to teleport it back every frame —
+    // the "o carro atravessa a parede e volta voando" report.
+    const scrub = (amount: number, lateral = 0): void => {
+      this.u *= Math.max(0, 1 - amount);
+      if (lateral) this.vLat *= Math.max(0, 1 - lateral);
+      if (Math.abs(this.u) < 0.4) this.u = 0;
+    };
+
     if (localSide === 'front') {
+      // Frontal: most of the speed becomes deformation, plus a small rebound.
+      scrub(Math.min(0.9, 0.35 + norm * 0.65));
+      // Pitch the body: the nose dips under deceleration.
+      this.pitchRad = -Math.min(0.09, norm * 0.09);
       this.damage.panelDeform.frontLeft = Math.min(1, this.damage.panelDeform.frontLeft + norm * 0.48);
       this.damage.panelDeform.frontRight = Math.min(1, this.damage.panelDeform.frontRight + norm * 0.48);
       this.damage.panelDeform.hood = Math.min(1, this.damage.panelDeform.hood + norm * 0.55);
@@ -244,16 +280,21 @@ export class VehicleDynamicsBody {
         for (let i = 0; i < 4; i++) this.wheelOmega[i] *= 0.55;
       }
     } else if (localSide === 'left') {
+      // Side scrape: little longitudinal loss, most of the lateral slide killed.
+      scrub(Math.min(0.45, norm * 0.35), Math.min(0.85, 0.3 + norm * 0.55));
       this.damage.panelDeform.sideLeft = Math.min(1, this.damage.panelDeform.sideLeft + norm * 0.52);
       this.damage.suspensionDamage = Math.min(1, this.damage.suspensionDamage + norm * 0.35);
       this.angularVelYaw -= norm * 0.9;
       if (relSpeedKmh > 95 && Math.random() < 0.35) this.wheels[0].punctured = true;
     } else if (localSide === 'right') {
+      scrub(Math.min(0.45, norm * 0.35), Math.min(0.85, 0.3 + norm * 0.55));
       this.damage.panelDeform.sideRight = Math.min(1, this.damage.panelDeform.sideRight + norm * 0.52);
       this.damage.suspensionDamage = Math.min(1, this.damage.suspensionDamage + norm * 0.35);
       this.angularVelYaw += norm * 0.9;
       if (relSpeedKmh > 95 && Math.random() < 0.35) this.wheels[1].punctured = true;
     } else {
+      // Rear impact (rammed from behind): the car is pushed forward, mild loss.
+      scrub(Math.min(0.35, norm * 0.25));
       this.damage.panelDeform.rear = Math.min(1, this.damage.panelDeform.rear + norm * 0.48);
       this.angularVelYaw += (Math.random() - 0.5) * norm * 1.3;
       if (relSpeedKmh > 80) this.damage.gearboxDamage = Math.min(1, this.damage.gearboxDamage + norm * 0.4);
@@ -532,8 +573,20 @@ export class VehicleDynamicsBody {
       limiterCut;
 
     // Engine braking / coast torque: present at zero throttle, stronger with rpm.
+    //
+    // BUG FIXED: this used to be a *signed* torque applied unconditionally, so a
+    // car standing still with the throttle closed was pushed backwards through
+    // the driveline at ~1.7 m/s² (measured: -0.8 m/s after 2 s, still
+    // accelerating). Every "o carro desliza sozinho / não fica parado" report
+    // traces back to this line.
+    //
+    // Coast torque is friction: it opposes the driveline's rotation and must
+    // vanish at rest. Real engine braking can slow a car, never launch it.
     const coastTorque = (1 - p.throttle) * (12 + 44 * rpmNorm) * (isRC ? 0.1 : 1);
-    let axleTorque = (engineTorque * p.throttle - coastTorque) * ratio * finalDrive * 0.92;
+    const drivelineMotion =
+      Math.abs(this.u) < 0.06 && p.throttle < 0.05 ? 0 : Math.sign(this.u);
+    let axleTorque =
+      (engineTorque * p.throttle - coastTorque * drivelineMotion) * ratio * finalDrive * 0.92;
     if (this.shiftTimer > 0) axleTorque = 0;
     // Over-rev: the engine is being driven past redline by the wheels. Fuel is
     // cut and pumping losses brake the driveline. This is what caps wheelspin

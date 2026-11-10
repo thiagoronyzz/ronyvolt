@@ -1,6 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { Camera, ChartNoAxesCombined, Eye, Gamepad2, Home, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
 import { CameraView, GameMode, LiveTelemetryFrame, RadioMessage } from '../types/game';
 import { audioEngine, RADIO_STATIONS } from '../audio/VelocityAudioEngine';
+import { customMusicPlayer, CustomPlayerState } from '../audio/CustomMusicPlayer';
+import { Minimap } from './Minimap';
 
 export type CinemaLut = 'natural' | 'kodak_portra' | 'fuji_velvia' | 'teal_orange' | 'noir_1940';
 
@@ -26,6 +29,14 @@ interface HudProps {
   onToggleImmersiveHud: () => void;
   onTogglePsxRetro: () => void;
   onBackToGarage: () => void;
+  onTogglePause: () => void;
+  onHorn: () => void;
+  minimap: {
+    points: { x: number; z: number }[];
+    player: { x: number; z: number; heading: number };
+    progress: number;
+    blips: { x: number; z: number; kind: 'rival' | 'police' }[];
+  } | null;
   onTouchInput: (partial: {
     throttle?: number;
     brake?: number;
@@ -49,6 +60,9 @@ export const RaceHud: React.FC<HudProps> = ({
   onToggleImmersiveHud,
   onTogglePsxRetro,
   onBackToGarage,
+  onTogglePause,
+  onHorn,
+  minimap,
   onTouchInput,
 }) => {
   const [stationId, setStationId] = useState(audioEngine.getStation());
@@ -87,53 +101,27 @@ export const RaceHud: React.FC<HudProps> = ({
   return (
     <>
       {/* Top Race Action Bar */}
-      <div
-        style={{
-          position: 'fixed',
-          top: 12,
-          left: 14,
-          right: 14,
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          pointerEvents: 'none',
-          zIndex: 25,
-          flexWrap: 'wrap',
-          gap: 8,
-        }}
-      >
+      <div className="hud-topbar">
         {/* Position, Lap & Timers */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 14,
-            background: 'rgba(6, 10, 20, 0.82)',
-            backdropFilter: 'blur(8px)',
-            padding: '8px 16px',
-            borderRadius: 12,
-            border: '1px solid rgba(255,255,255,0.14)',
-            pointerEvents: 'auto',
-            alignItems: 'center',
-          }}
-        >
+        <div className="hud-cluster">
           <div>
-            <div style={{ fontSize: 10, color: '#94a3b8' }}>POSIÇÃO</div>
-            <div style={{ fontSize: 22, fontWeight: 900, color: '#ffbe0b' }}>
+            <div className="hud-stat-label">Posição</div>
+            <div className="hud-stat-value" style={{ color: '#ffbe0b' }}>
               P{frame.position}
               <span style={{ fontSize: 13, color: '#cbd5e1' }}>/{frame.totalRacers}</span>
             </div>
           </div>
 
           <div>
-            <div style={{ fontSize: 10, color: '#94a3b8' }}>VOLTA</div>
-            <div style={{ fontSize: 20, fontWeight: 800 }}>
+            <div className="hud-stat-label">Volta</div>
+            <div className="hud-stat-value">
               {frame.lap}/{mode === 'time_trial' ? '∞' : totalLaps}
             </div>
           </div>
 
           <div>
-            <div style={{ fontSize: 10, color: '#94a3b8' }}>CRONÔMETRO</div>
-            <div style={{ fontSize: 18, fontWeight: 800, fontFamily: 'monospace', color: '#00f5d4' }}>
+            <div className="hud-stat-label">Cronômetro</div>
+            <div className="hud-stat-value" style={{ color: '#00f5d4', fontFamily: 'var(--vu-mono)' }}>
               {formatTime(frame.lapTimeSec)}
             </div>
           </div>
@@ -185,7 +173,7 @@ export const RaceHud: React.FC<HudProps> = ({
         </div>
 
         {/* Top-Right Quick Controls */}
-        <div style={{ display: 'flex', gap: 6, pointerEvents: 'auto', flexWrap: 'wrap' }}>
+        <div className="hud-actions">
           <select
             value={stationId}
             onChange={(e) => {
@@ -201,14 +189,20 @@ export const RaceHud: React.FC<HudProps> = ({
             ))}
           </select>
 
+          <button onClick={onTogglePause} style={hudBtn} title="Pausar (Esc)">
+            <Pause size={13} /> PAUSAR
+          </button>
+          <button onClick={onHorn} style={hudBtn} title="Buzina (H)">
+            <Volume2 size={13} /> BUZINA
+          </button>
           <button onClick={onCycleCamera} style={hudBtn}>
-            🎥 CÂMERA: {cameraView.toUpperCase()} [C]
+            <Camera size={13} /> {cameraView.toUpperCase()} [C]
           </button>
           <button onClick={onToggleTelemetry} style={hudBtn}>
-            📊 TELEMETRIA
+            <ChartNoAxesCombined size={13} /> TELEMETRIA
           </button>
           <button onClick={onTogglePhotoMode} style={hudBtn}>
-            📸 MODO FOTO
+            <Gamepad2 size={13} /> MODO FOTO
           </button>
           <button
             onClick={onTogglePsxRetro}
@@ -221,13 +215,13 @@ export const RaceHud: React.FC<HudProps> = ({
             👾 {psxRetro ? 'PSX 1999 ON' : 'FILTRO PSX'}
           </button>
           <button onClick={onToggleImmersiveHud} style={hudBtn}>
-            👁️ IMERSIVO
+            <Eye size={13} /> IMERSIVO
           </button>
           <button
             onClick={onBackToGarage}
             style={{ ...hudBtn, background: 'rgba(239, 35, 60, 0.85)', borderColor: '#ef233c' }}
           >
-            🏠 GARAGEM 3D
+            <Home size={13} /> GARAGEM
           </button>
         </div>
       </div>
@@ -272,20 +266,22 @@ export const RaceHud: React.FC<HudProps> = ({
         </svg>
       )}
 
+      {/* Start lights: red while the car is held on the grid */}
+      {frame.lap === 1 && frame.speedKmh < 1 && frame.lapTimeSec < 0.5 && (
+        <div className="hud-startlights" aria-hidden>
+          <span className="on" />
+          <span className="on" />
+          <span className="on" />
+        </div>
+      )}
+
+      {/* Track map (top-left, under the position cluster) */}
+      {minimap && !immersiveNoHud && (
+        <Minimap points={minimap.points} player={minimap.player} progress={minimap.progress} blips={minimap.blips} />
+      )}
+
       {/* Localized Voice Radio Chatter Feed (Left-Bottom) */}
-      <div
-        style={{
-          position: 'fixed',
-          bottom: 22,
-          left: 16,
-          width: 'min(370px, 55vw)',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 6,
-          pointerEvents: 'none',
-          zIndex: 25,
-        }}
-      >
+      <div className="hud-radio">
         {radioFeed.slice(-3).map((msg) => (
           <div
             key={msg.id}
@@ -317,16 +313,7 @@ export const RaceHud: React.FC<HudProps> = ({
       </div>
 
       {/* Touch / On-Screen Pedals for Mobile & Tablet */}
-      <div
-        style={{
-          position: 'fixed',
-          bottom: 150,
-          right: 18,
-          display: 'flex',
-          gap: 8,
-          zIndex: 25,
-        }}
-      >
+      <div className="hud-pedals">
         <button
           onPointerDown={() => onTouchInput({ steer: -1 })}
           onPointerUp={() => onTouchInput({ steer: 0 })}
@@ -358,20 +345,7 @@ export const RaceHud: React.FC<HudProps> = ({
       </div>
 
       {/* Bottom-Right Digital Tachometer, Gear, Boost & Nitro Cluster */}
-      <div
-        style={{
-          position: 'fixed',
-          bottom: 18,
-          right: 18,
-          width: 265,
-          background: 'rgba(6, 10, 20, 0.88)',
-          backdropFilter: 'blur(10px)',
-          border: '1px solid rgba(255,255,255,0.16)',
-          borderRadius: 16,
-          padding: '12px 16px',
-          zIndex: 25,
-        }}
-      >
+      <div className="hud-tacho">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div>
             <span style={{ fontSize: 42, fontWeight: 900, letterSpacing: -1 }}>
@@ -413,8 +387,116 @@ export const RaceHud: React.FC<HudProps> = ({
           <span>NITRO {Math.round(frame.nitroRemainingPct)}%</span>
           <span>CHAS. {Math.round(frame.damage.engineHealth)}%</span>
         </div>
+
+        {/* Damage: one bar per panel, so a hit is legible at a glance */}
+        <div className="hud-damage" title="Estado da carroceria">
+          {(
+            [
+              ['F', frame.damage.panelDeform.frontLeft + frame.damage.panelDeform.frontRight],
+              ['E', frame.damage.panelDeform.sideLeft],
+              ['D', frame.damage.panelDeform.sideRight],
+              ['T', frame.damage.panelDeform.rear],
+              ['C', frame.damage.panelDeform.hood],
+            ] as [string, number][]
+          ).map(([label, raw]) => {
+            const dmg = Math.max(0, Math.min(1, raw));
+            return (
+              <div key={label} className="seg" title={`${label}: ${Math.round(dmg * 100)}%`}>
+                <span style={{ height: `${8 + dmg * 92}%`, background: dmg > 0.5 ? '#ef233c' : dmg > 0.2 ? '#ffbe0b' : '#06d6a0' }} />
+                <em>{label}</em>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Tyre temperatures (inner/mid/outer mean) — the F1-style tell */}
+        <div className="hud-tyres" title="Temperatura dos pneus">
+          {['FL', 'FR', 'RL', 'RR'].map((label, i) => {
+            const w = frame.wheels[i];
+            const t = w ? (w.tempInnerC + w.tempMidC + w.tempOuterC) / 3 : 0;
+            // 60 °C cold → blue, 90 °C optimal → green, 120 °C+ → red
+            const hue = Math.max(0, Math.min(200, 200 - Math.max(0, (t - 60) / 70) * 200));
+            return (
+              <div key={label} className="tyre" style={{ borderColor: `hsl(${hue} 80% 55%)`, color: `hsl(${hue} 85% 62%)` }}>
+                {label}
+                <b>{Math.round(t)}°</b>
+              </div>
+            );
+          })}
+        </div>
       </div>
+
+      {/* Imported-MP3 mini player (in-race transport) */}
+      <MiniPlayer />
     </>
+  );
+};
+
+/**
+ * Compact in-race transport for "Minhas Músicas": prev / play-pause / next,
+ * track name and an independent volume slider. Hidden when the library is
+ * empty so it never clutters the HUD.
+ */
+const MiniPlayer: React.FC = () => {
+  const [state, setState] = useState<CustomPlayerState>(() => customMusicPlayer.getState());
+  const [mode, setMode] = useState<'game' | 'mine'>(() => audioEngine.getMusicMode());
+  useEffect(() => {
+    const unsub = customMusicPlayer.subscribe(setState);
+    const id = window.setInterval(() => setMode(audioEngine.getMusicMode()), 1200);
+    return () => {
+      unsub();
+      window.clearInterval(id);
+    };
+  }, []);
+  if (state.count === 0) return null;
+  return (
+    <div className="hud-miniplayer" data-mode={mode}>
+      <button
+        className="vu-btn vu-btn-icon"
+        onClick={() => {
+          const nextMode = mode === 'mine' ? 'game' : 'mine';
+          audioEngine.init();
+          audioEngine.setMusicMode(nextMode);
+          if (nextMode === 'mine') customMusicPlayer.play();
+          setMode(nextMode);
+        }}
+        title={mode === 'mine' ? 'Trocando para a trilha do jogo' : 'Trocando para suas músicas'}
+        style={{ fontSize: 9, fontWeight: 800, width: 'auto', padding: '0 8px' }}
+      >
+        {mode === 'mine' ? 'MP3' : 'TRILHA'}
+      </button>
+      <button className="vu-btn vu-btn-icon" onClick={() => customMusicPlayer.previous()} title="Anterior">
+        <SkipBack size={15} />
+      </button>
+      <button
+        className="vu-btn vu-btn-icon"
+        style={{ background: '#ff9500', color: '#000', border: 'none' }}
+        onClick={() => customMusicPlayer.toggle()}
+        title={state.playing ? 'Pausar' : 'Tocar'}
+      >
+        {state.playing ? <Pause size={15} /> : <Play size={15} />}
+      </button>
+      <button className="vu-btn vu-btn-icon" onClick={() => customMusicPlayer.next()} title="Próxima">
+        <SkipForward size={15} />
+      </button>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {state.trackName ?? 'Minhas Músicas'}
+        </div>
+        <div style={{ fontSize: 9, color: '#94a3b8' }}>
+          {state.index + 1}/{state.count} • {state.playing ? 'tocando' : 'pausado'}
+        </div>
+      </div>
+      {state.volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
+      <input
+        type="range"
+        min={0}
+        max={100}
+        value={Math.round(state.volume * 100)}
+        onChange={(e) => audioEngine.setCustomVolume(Number(e.target.value) / 100)}
+        title="Volume das minhas músicas"
+      />
+    </div>
   );
 };
 

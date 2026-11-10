@@ -378,6 +378,7 @@ const modalWrap: React.CSSProperties = {
   border: '1px solid rgba(255,255,255,0.14)',
   borderRadius: 16,
   padding: 18,
+  fontFamily: 'var(--vu-font)',
   zIndex: 50,
   display: 'flex',
   flexDirection: 'column',

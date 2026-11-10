@@ -198,6 +198,7 @@ const GRADE_SHADER = {
     uSaturation: { value: 1.04 },
     uLift: { value: 0.0 },
     uPhotoMode: { value: 0.0 },
+    uSpeedBlur: { value: 0.0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -240,6 +241,21 @@ const GRADE_SHADER = {
       color.r = texture2D(tDiffuse, uv - dir * ca).r;
       color.g = texture2D(tDiffuse, uv).g;
       color.b = texture2D(tDiffuse, uv + dir * ca).b;
+
+      // --- Speed blur (radial, subtle) -------------------------------------
+      // At speed a real shutter smears the periphery toward the vanishing
+      // point. Four taps along the radial direction, scaled by uSpeedBlur
+      // (0 at rest, ~0.35 at top speed), sell velocity without a full
+      // motion-blur pass. Disabled in photo mode (still = sharp).
+      if (uSpeedBlur > 0.002 && uPhotoMode < 0.5) {
+        float blurAmt = uSpeedBlur * r2 * 0.055;
+        vec3 blurred = color;
+        blurred += texture2D(tDiffuse, uv - dir * blurAmt).rgb;
+        blurred += texture2D(tDiffuse, uv - dir * blurAmt * 2.0).rgb;
+        blurred += texture2D(tDiffuse, uv - dir * blurAmt * 3.0).rgb;
+        blurred += texture2D(tDiffuse, uv - dir * blurAmt * 4.0).rgb;
+        color = mix(color, blurred * 0.2, clamp(uSpeedBlur, 0.0, 1.0) * 0.55);
+      }
 
       // --- Unsharp mask (photographic micro-contrast) -----------------------
       // A small 4-tap high-pass adds perceived detail without a real sharpen
@@ -443,6 +459,19 @@ export class RealismRenderer {
     this.bloomPass.setSize(width, height);
     const px = this.renderer.getPixelRatio();
     this.gradePass.uniforms.uResolution.value.set(width * px, height * px);
+  }
+
+  /** Speed-blur strength 0..1 (0 = off). Fed by the engine from car speed. */
+  public setSpeedBlur(amount: number): void {
+    this.gradePass.uniforms.uSpeedBlur.value = Math.max(0, Math.min(1, amount));
+  }
+
+  public setBloomEnabled(enabled: boolean): void {
+    this.bloomPass.enabled = enabled;
+  }
+
+  public get bloomEnabled(): boolean {
+    return this.bloomPass.enabled;
   }
 
   /** Radially-faded blob used as a cheap contact occlusion decal. */

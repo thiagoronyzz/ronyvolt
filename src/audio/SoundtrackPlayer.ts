@@ -263,6 +263,12 @@ export class SoundtrackPlayer {
     this.startScheduler();
   }
 
+  /** Pause: kills the scheduler and voices but keeps the track selected. */
+  public pause(): void {
+    if (!this.playing) return;
+    this.stop();
+  }
+
   public stop(): void {
     this.playing = false;
     if (this.timer !== null) {

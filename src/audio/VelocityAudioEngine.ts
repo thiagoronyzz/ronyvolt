@@ -2,6 +2,7 @@ import { CameraView, CarSpec, CarTuneSetup, EngineType } from '../types/game';
 import { AcousticEnvironment, EngineAcoustics } from './EngineAcoustics';
 import { soundtrackPlayer } from './SoundtrackPlayer';
 import { DEFAULT_PLAYLIST } from './Soundtrack';
+import { customMusicPlayer } from './CustomMusicPlayer';
 
 export interface RadioStationSpec {
   id: string;
@@ -13,6 +14,7 @@ export interface RadioStationSpec {
 
 export const RADIO_STATIONS: RadioStationSpec[] = [
   { id: 'off', name: 'Rádio Desligado (Puro Motor)', genre: 'Motor Puro', djName: '—', bpm: 0 },
+  { id: 'soundtrack', name: 'TRILHA VELOCITY (ORIGINAL)', genre: 'Trilha Original do Jogo', djName: 'Velocity Studio', bpm: 128 },
   { id: 'eurobeat', name: '98.6 TOUGE EUROBEAT FM', genre: 'Eurobeat / Drift', djName: 'DJ Takumi', bpm: 158 },
   { id: 'bossa_mpb', name: '101.4 IPANEMA BOSSA & MPB', genre: 'Bossa Nova / Tom Digital', djName: 'DJ Vinícius', bpm: 112 },
   { id: 'synthwave', name: '2099 NEO TOKYO SYNTH FM', genre: 'Synthwave / Outrun', djName: 'AI Kusanagi', bpm: 124 },
@@ -34,9 +36,27 @@ export class VelocityAudioEngine {
   private turboGain: GainNode | null = null;
   private tireNoiseGain: GainNode | null = null;
   private windGain: GainNode | null = null;
+  // Track ambience: crowd murmur + wind, both independent of the engine voice.
+  private crowdGain: GainNode | null = null;
+  private crowdFilter: BiquadFilterNode | null = null;
+  private ambienceWindGain: GainNode | null = null;
+  private crowdExcitement = 0;
 
   private musicGain: GainNode | null = null;
   private bassAnalyser: AnalyserNode | null = null;
+  // Independent buses so the player can balance engine / SFX / soundtrack /
+  // imported MP3s separately (Settings → Áudio).
+  private engineBus: GainNode | null = null;
+  private sfxBus: GainNode | null = null;
+  private customGain: GainNode | null = null;
+  private engineVolume = 1;
+  private sfxVolume = 1;
+  private customVolume = 0.8;
+  private masterVolume = 1;
+  private menuPaused = false;
+  private musicPausedByMenu = false;
+  private wasSoundtrackPlaying = false;
+  private wasCustomPlaying = false;
   private customAudioEl: HTMLAudioElement | null = null;
   private customMediaNode: MediaElementAudioSourceNode | null = null;
 
@@ -143,6 +163,41 @@ export class VelocityAudioEngine {
     windNoise.connect(windFilter).connect(this.windGain).connect(this.masterGain);
     windNoise.start();
 
+    // ---- Track ambience: crowd + wind -------------------------------------
+    // Two filtered noise layers under everything else. The crowd rises with
+    // speed and with overtakes/crashes (cheer()), the wind follows speed — the
+    // two things a TV broadcast of a race never lacks.
+    const crowdNoise = this.ctx.createBufferSource();
+    crowdNoise.buffer = noiseBuffer;
+    crowdNoise.loop = true;
+    this.crowdFilter = this.ctx.createBiquadFilter();
+    this.crowdFilter.type = 'bandpass';
+    this.crowdFilter.frequency.value = 700;
+    this.crowdFilter.Q.value = 0.8;
+    this.crowdGain = this.ctx.createGain();
+    this.crowdGain.gain.value = 0;
+    crowdNoise.connect(this.crowdFilter).connect(this.crowdGain).connect(this.masterGain);
+    crowdNoise.start();
+
+    const ambWind = this.ctx.createBufferSource();
+    ambWind.buffer = noiseBuffer;
+    ambWind.loop = true;
+    const ambWindFilter = this.ctx.createBiquadFilter();
+    ambWindFilter.type = 'highpass';
+    ambWindFilter.frequency.value = 900;
+    this.ambienceWindGain = this.ctx.createGain();
+    this.ambienceWindGain.gain.value = 0;
+    ambWind.connect(ambWindFilter).connect(this.ambienceWindGain).connect(this.masterGain);
+    ambWind.start();
+
+    // Independent buses: engine, SFX, soundtrack synth, imported MP3s.
+    this.engineBus = this.ctx.createGain();
+    this.engineBus.gain.value = this.engineVolume;
+    this.engineBus.connect(this.masterGain);
+    this.sfxBus = this.ctx.createGain();
+    this.sfxBus.gain.value = this.sfxVolume;
+    this.sfxBus.connect(this.masterGain);
+
     // Music & Bass Analyser for Subwoofer Chassis Shake!
     this.musicGain = this.ctx.createGain();
     this.musicGain.gain.value = 0.25;
@@ -150,6 +205,14 @@ export class VelocityAudioEngine {
     this.bassAnalyser.fftSize = 64;
     this.musicGain.connect(this.bassAnalyser);
     this.bassAnalyser.connect(this.masterGain);
+
+    // Imported MP3s: own gain (own volume), tapped into the same analyser so
+    // the subwoofer chassis-shake easter egg reacts to the player's music too.
+    this.customGain = this.ctx.createGain();
+    this.customGain.gain.value = this.customVolume;
+    this.customGain.connect(this.bassAnalyser);
+    customMusicPlayer.attach(this.ctx, this.customGain);
+    customMusicPlayer.setVolume(this.customVolume);
 
     // Original soundtrack: a real sequencer with a look-ahead scheduler, its own
     // per-instrument envelopes and a side-chain duck. It plays through the same
@@ -163,7 +226,8 @@ export class VelocityAudioEngine {
     // Firing-order acoustic model replaces the three-oscillator bank below.
     // The old bank is kept instantiated (it is referenced by other features)
     // but its gain stays at zero: two engine sounds layered is worse than one.
-    this.acoustics = new EngineAcoustics(this.ctx, this.masterGain, this.currentEngineType);
+    // Engine voice goes through engineBus so its volume is independent.
+    this.acoustics = new EngineAcoustics(this.ctx, this.engineBus ?? this.masterGain, this.currentEngineType);
 
   }
 
@@ -205,8 +269,90 @@ export class VelocityAudioEngine {
 
   public setMuted(muted: boolean): void {
     this.isMuted = muted;
-    if (this.masterGain && this.ctx) {
-      this.masterGain.gain.setTargetAtTime(muted ? 0 : 0.42, this.ctx.currentTime, 0.05);
+    this.applyMasterGain();
+  }
+
+  /** Overall volume (0..1), independent of mute. */
+  public setMasterVolume(v: number): void {
+    this.masterVolume = Math.max(0, Math.min(1, v));
+    this.applyMasterGain();
+  }
+
+  public getMasterVolume(): number {
+    return this.masterVolume;
+  }
+
+  private applyMasterGain(): void {
+    if (!this.masterGain || !this.ctx) return;
+    const target = this.isMuted || this.menuPaused ? 0 : 0.42 * this.masterVolume;
+    this.masterGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.05);
+  }
+
+  /**
+   * Resume the AudioContext. Browsers only allow this from a user gesture, so
+   * the app calls it on the first pointer/key event — otherwise the engine,
+   * the soundtrack and imported MP3s stay silent until the player happens to
+   * press a control that starts audio.
+   */
+  public unlock(): void {
+    if (!this.ctx) {
+      this.init();
+      return;
+    }
+    if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+  }
+
+  // --- Independent volume buses (Settings → Áudio) -------------------------
+
+  public setEngineVolume(v: number): void {
+    this.engineVolume = Math.max(0, Math.min(1.5, v));
+    if (this.engineBus && this.ctx) {
+      this.engineBus.gain.setTargetAtTime(this.engineVolume, this.ctx.currentTime, 0.05);
+    }
+  }
+
+  public getEngineVolume(): number {
+    return this.engineVolume;
+  }
+
+  public setSfxVolume(v: number): void {
+    this.sfxVolume = Math.max(0, Math.min(1.5, v));
+    if (this.sfxBus && this.ctx) {
+      this.sfxBus.gain.setTargetAtTime(this.sfxVolume, this.ctx.currentTime, 0.05);
+    }
+  }
+
+  public getSfxVolume(): number {
+    return this.sfxVolume;
+  }
+
+  public setCustomVolume(v: number): void {
+    this.customVolume = Math.max(0, Math.min(1, v));
+    customMusicPlayer.setVolume(this.customVolume);
+  }
+
+  public getCustomVolume(): number {
+    return this.customVolume;
+  }
+
+  /** Dual-tone horn (buzina): two detuned fundamentals with a fast attack. */
+  public horn(): void {
+    if (!this.ctx || !this.sfxBus || this.isMuted) return;
+    if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    const now = this.ctx.currentTime;
+    const dur = 0.45;
+    for (const freq of [392, 494]) {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(freq, now);
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.055, now + 0.015);
+      g.gain.setValueAtTime(0.055, now + dur - 0.06);
+      g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+      osc.connect(g).connect(this.sfxBus);
+      osc.start(now);
+      osc.stop(now + dur + 0.02);
     }
   }
 
@@ -214,17 +360,96 @@ export class VelocityAudioEngine {
     return this.isMuted;
   }
 
+  /**
+   * Pause everything looping (engine, tires, wind, music). Called from the game
+   * pause state machine so a paused race is actually silent, and resumed
+   * exactly where it stopped — pausing and unpausing used to leave the engine
+   * note and the music bed running under the pause menu.
+   */
+  /**
+   * Track ambience level, called every frame. `crowd` 0..1 is the base murmur
+   * (grandstands near the line), `speed` 0..1 adds wind and a little crowd
+   * swell as the car passes the crowd at speed.
+   */
+  public updateAmbience(speedKmh: number, crowdBase = 0.35): void {
+    if (!this.ctx || !this.crowdGain || !this.ambienceWindGain) return;
+    const now = this.ctx.currentTime;
+    const speed = Math.max(0, Math.min(1, speedKmh / 280));
+    this.crowdExcitement = Math.max(0, this.crowdExcitement - 0.6 * (1 / 60));
+    const crowd = Math.min(1, crowdBase * (0.55 + speed * 0.5) + this.crowdExcitement);
+    this.crowdGain.gain.setTargetAtTime(this.isMuted ? 0 : crowd * 0.085, now, 0.25);
+    this.ambienceWindGain.gain.setTargetAtTime(this.isMuted ? 0 : speed * speed * 0.05, now, 0.2);
+    if (this.crowdFilter) {
+      this.crowdFilter.frequency.setTargetAtTime(620 + crowd * 520 + speed * 160, now, 0.3);
+    }
+  }
+
+  /** Crowd reacts: overtake, crash, drift combo, finish line. */
+  public cheer(intensity = 1): void {
+    this.crowdExcitement = Math.min(1.2, this.crowdExcitement + 0.35 * intensity);
+  }
+
+  public pauseForMenu(): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.menuPaused = true;
+    // Duck the whole mix instead of stopping nodes: no click, no rebuild cost.
+    this.masterGain?.gain.setTargetAtTime(0, now, 0.08);
+    this.wasSoundtrackPlaying = soundtrackPlayer.isPlaying;
+    soundtrackPlayer.pause();
+    this.wasCustomPlaying = customMusicPlayer.getState().playing;
+    customMusicPlayer.pause();
+    this.musicPausedByMenu = true;
+  }
+
+  /**
+   * Called from the first real user gesture. If an imported MP3 was requested
+   * before the context unlocked, actually start it now — otherwise the player
+   * presses play in the garage, hears nothing until the race starts, and
+   * concludes the feature is broken.
+   */
+  public retryPendingCustomPlayback(): void {
+    if (this.currentStationId !== 'custom_usb') return;
+    customMusicPlayer.resumeIfLoaded();
+  }
+
+  public resumeFromMenu(): void {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.menuPaused = false;
+    this.applyMasterGain();
+    if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    if (this.musicPausedByMenu) {
+      if (this.wasCustomPlaying) customMusicPlayer.play();
+      else if (this.wasSoundtrackPlaying) soundtrackPlayer.ensurePlaying();
+      this.musicPausedByMenu = false;
+    }
+  }
+
+  public isMenuPaused(): boolean {
+    return this.menuPaused;
+  }
+
+  /** Which music source is driving the car: synth soundtrack or imported MP3s. */
+  public getMusicMode(): 'game' | 'mine' {
+    return this.currentStationId === 'custom_usb' ? 'mine' : 'game';
+  }
+
+  public setMusicMode(mode: 'game' | 'mine'): void {
+    this.setStation(mode === 'mine' ? 'custom_usb' : 'soundtrack');
+  }
+
   public setStation(stationId: string): void {
     // Any gesture from the UI should be enough to unblock audio on browsers
     // that start an AudioContext in the "suspended" state.
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
     this.currentStationId = stationId;
-    if (this.customAudioEl) {
-      if (stationId.startsWith('track:') || stationId === 'off' || stationId === 'soundtrack') {
-        this.customAudioEl.pause();
-      } else if (stationId === 'custom_usb') {
-        this.customAudioEl.play().catch(() => {});
-      }
+    // Imported MP3s ("Minhas Músicas") play only on the custom_usb station;
+    // every other station pauses them so two beds never overlap.
+    if (stationId === 'custom_usb') {
+      customMusicPlayer.play();
+    } else {
+      customMusicPlayer.pause();
     }
     // New soundtrack path: `track:<id>` plays one original composition and
     // `soundtrack` plays the player's playlist. The legacy chiptune stations
@@ -243,6 +468,24 @@ export class VelocityAudioEngine {
       soundtrackPlayer.stop();
     }
     this.startRadioSequencer();
+  }
+
+  /** True when the synth soundtrack is actually sounding right now. */
+  public isSoundtrackPlaying(): boolean {
+    return this.currentStationId === 'soundtrack' && soundtrackPlayer.isPlaying;
+  }
+
+  /** Resume the synth soundtrack where it stopped (no rewind). */
+  public resumeSoundtrack(): void {
+    if (!this.ctx) this.init();
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    this.currentStationId = 'soundtrack';
+    soundtrackPlayer.ensurePlaying();
+  }
+
+  /** Pause the synth soundtrack, keeping the position. */
+  public pauseSoundtrack(): void {
+    soundtrackPlayer.pause();
   }
 
   /** Playlist controls surfaced by the garage player UI. */
@@ -333,11 +576,15 @@ export class VelocityAudioEngine {
     soundtrackPlayer.setSpeedTempo(speedKmh);
   }
 
+  private bassData: Uint8Array<ArrayBuffer> | null = null;
+
   public getBassEnergy(): number {
     if (!this.bassAnalyser || this.currentStationId === 'off') return 0;
-    const arr = new Uint8Array(this.bassAnalyser.frequencyBinCount);
-    this.bassAnalyser.getByteFrequencyData(arr);
-    const lowSum = (arr[0] + arr[1] + arr[2] + arr[3]) / (4 * 255);
+    if (!this.bassData || this.bassData.length !== this.bassAnalyser.frequencyBinCount) {
+      this.bassData = new Uint8Array(this.bassAnalyser.frequencyBinCount) as Uint8Array<ArrayBuffer>;
+    }
+    this.bassAnalyser.getByteFrequencyData(this.bassData);
+    const lowSum = (this.bassData[0] + this.bassData[1] + this.bassData[2] + this.bassData[3]) / (4 * 255);
     return lowSum;
   }
 
@@ -487,7 +734,7 @@ export class VelocityAudioEngine {
     osc.frequency.exponentialRampToValueAtTime(65, now + 0.055);
     g.gain.setValueAtTime(0.16, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
-    osc.connect(g).connect(this.masterGain);
+    osc.connect(g).connect(this.sfxBus ?? this.masterGain);
     osc.start(now);
     osc.stop(now + 0.065);
   }
@@ -503,7 +750,7 @@ export class VelocityAudioEngine {
     osc.frequency.exponentialRampToValueAtTime(700, now + 0.18);
     g.gain.setValueAtTime(0.09, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.19);
-    osc.connect(g).connect(this.masterGain);
+    osc.connect(g).connect(this.sfxBus ?? this.masterGain);
     osc.start(now);
     osc.stop(now + 0.2);
 
@@ -515,7 +762,7 @@ export class VelocityAudioEngine {
     pop.frequency.exponentialRampToValueAtTime(32, now + 0.16);
     pg.gain.setValueAtTime(0.18, now + 0.08);
     pg.gain.exponentialRampToValueAtTime(0.001, now + 0.17);
-    pop.connect(pg).connect(this.masterGain);
+    pop.connect(pg).connect(this.sfxBus ?? this.masterGain);
     pop.start(now + 0.08);
     pop.stop(now + 0.18);
   }
@@ -530,7 +777,7 @@ export class VelocityAudioEngine {
     osc.frequency.exponentialRampToValueAtTime(28, now + 0.24);
     g.gain.setValueAtTime(Math.min(0.35, 0.08 + intensity * 0.22), now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.25);
-    osc.connect(g).connect(this.masterGain);
+    osc.connect(g).connect(this.sfxBus ?? this.masterGain);
     osc.start(now);
     osc.stop(now + 0.26);
   }
@@ -551,7 +798,7 @@ export class VelocityAudioEngine {
     g.gain.setValueAtTime(0.01, now);
     g.gain.linearRampToValueAtTime(0.14, now + 0.18);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.46);
-    osc.connect(g).connect(this.masterGain);
+    osc.connect(g).connect(this.sfxBus ?? this.masterGain);
     osc.start(now);
     osc.stop(now + 0.48);
   }
@@ -566,7 +813,7 @@ export class VelocityAudioEngine {
       beep.frequency.value = 1240;
       g.gain.setValueAtTime(0.05, now);
       g.gain.exponentialRampToValueAtTime(0.001, now + 0.07);
-      beep.connect(g).connect(this.masterGain);
+      beep.connect(g).connect(this.sfxBus ?? this.masterGain);
       beep.start(now);
       beep.stop(now + 0.08);
     }

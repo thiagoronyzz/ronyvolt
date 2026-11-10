@@ -1,5 +1,30 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Car,
+  Clapperboard,
+  DoorOpen,
+  Flag,
+  Flame,
+  Gauge,
+  Globe,
+  Hammer,
+  Home,
+  Music2,
+  Play,
+  RotateCcw,
+  Settings,
+  ShieldAlert,
+  Smartphone,
+  Speaker,
+  Volume2,
+  VolumeX,
+  Trophy,
+  Wallet,
+  Wind,
+  Wrench,
+  Zap,
+} from 'lucide-react';
+import {
   CameraView,
   CareerChapter,
   CareerChoice,
@@ -32,8 +57,38 @@ import {
   RaceHud,
 } from './components/RaceHudAndPhotoMode';
 import { audioEngine, RADIO_STATIONS } from './audio/VelocityAudioEngine';
+import { GameSettings, SettingsModal } from './components/SettingsModal';
+import { PauseMenu } from './components/PauseMenu';
+import { ScreenVeil } from './components/ScreenVeil';
 
 type ColorblindMode = 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia';
+
+const SETTINGS_KEY = 'velocity_settings_v1';
+
+const DEFAULT_SETTINGS: GameSettings = {
+  masterVolume: 1,
+  engineVolume: 1,
+  sfxVolume: 1,
+  musicVolume: 0.85,
+  customVolume: 0.8,
+  muted: false,
+  pixelRatioCap: 2,
+  bloomEnabled: true,
+  cameraShakeEnabled: true,
+  speedBlurEnabled: true,
+  invertSteering: false,
+  colorblindMode: 'none',
+};
+
+function loadSettings(): GameSettings {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS, ...(JSON.parse(raw) as Partial<GameSettings>) };
+  } catch {
+    return DEFAULT_SETTINGS;
+  }
+}
 
 const DEFAULT_CUSTOM_TRACK: CustomTrackData = {
   name: 'Circuito Autoral Velocity #01',
@@ -124,6 +179,12 @@ export const App: React.FC = () => {
   const [psxRetro, setPsxRetro] = useState(false);
   const [muted, setMuted] = useState(false);
   const [colorblindMode, setColorblindMode] = useState<ColorblindMode>('none');
+  const [paused, setPaused] = useState(false);
+  const [minimapData, setMinimapData] = useState<ReturnType<
+    NonNullable<typeof engineRef.current>['getMinimapData']
+  >>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState<GameSettings>(loadSettings);
 
   // Photo Mode Studio
   const [photoMode, setPhotoMode] = useState(false);
@@ -152,9 +213,15 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!viewportRef.current) return;
     const engine = new VelocityEngine(viewportRef.current, {
-      onTelemetry: (frame) => setTelemetryFrame(frame),
+      onTelemetry: (frame) => {
+        setTelemetryFrame(frame);
+        // One read per telemetry tick: the map is static geometry plus live
+        // points, so there is no reason to re-read it every animation frame.
+        setMinimapData(engineRef.current?.getMinimapData() ?? null);
+      },
       onRadioMessage: (msg) => setRadioFeed((prev) => [...prev.slice(-8), msg]),
       onSheepDisqualification: () => setSheepDisqualified(true),
+      onPauseChanged: (p) => setPaused(p),
       onRaceFinished: (res) => {
         const podiumBonus = res.position === 1 ? 35000 : res.position <= 3 ? 20000 : 8500;
         const styleBonus = Math.round(res.driftScore * 0.4 + res.stuntScore * 0.5 + res.deliveries * 4500);
@@ -180,6 +247,58 @@ export const App: React.FC = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Apply + persist settings (audio buses, render quality, steering).
+  // First real user gesture: browsers only unlock audio from an input event.
+  // One listener, removed immediately, so the MP3 player and the engine come
+  // alive on the first click/tap instead of staying silent.
+  useEffect(() => {
+    const unlock = () => {
+      audioEngine.unlock();
+      audioEngine.retryPendingCustomPlayback();
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, []);
+
+  // Mobile default: a 1x pixel ratio on touch devices. A 3x phone screen at
+  // 2x render scale is 4x the pixels of a desktop window and is the single
+  // biggest cause of "o jogo fica lento no celular". The player can raise it in
+  // Settings → Gráficos.
+  useEffect(() => {
+    const coarse = window.matchMedia?.('(pointer: coarse)').matches;
+    if (!coarse) return;
+    setSettings((s0) => (s0.pixelRatioCap === 2 ? { ...s0, pixelRatioCap: 1 } : s0));
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    } catch {
+      // storage unavailable — settings still apply for the session
+    }
+    audioEngine.setMuted(settings.muted);
+    audioEngine.setEngineVolume(settings.engineVolume);
+    audioEngine.setSfxVolume(settings.sfxVolume);
+    audioEngine.setMusicVolume(settings.musicVolume);
+    audioEngine.setCustomVolume(settings.customVolume);
+    setMuted(settings.muted);
+    setColorblindMode(settings.colorblindMode);
+    const engine = engineRef.current;
+    if (engine) {
+      engine.setPixelRatioCap(settings.pixelRatioCap);
+      engine.setBloomEnabled(settings.bloomEnabled);
+      engine.setCameraShakeEnabled(settings.cameraShakeEnabled);
+      engine.setSpeedBlurEnabled(settings.speedBlurEnabled);
+      engine.setInvertSteering(settings.invertSteering);
+    }
+  }, [settings]);
 
   // Refresh 3D Garage whenever car, tune, garage tier, or posters change while in Garage
   useEffect(() => {
@@ -221,6 +340,7 @@ export const App: React.FC = () => {
     setSheepDisqualified(false);
     setRadioFeed([]);
     setPhotoMode(false);
+    setPaused(false);
     setInRace(true);
 
     engineRef.current.startRace({
@@ -243,6 +363,8 @@ export const App: React.FC = () => {
   };
 
   const returnToGarage = () => {
+    engineRef.current?.setPaused(false);
+    setPaused(false);
     setInRace(false);
     setPhotoMode(false);
     setRaceResult(null);
@@ -273,6 +395,17 @@ export const App: React.FC = () => {
 
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative', overflow: 'hidden' }}>
+      {/* Smooth transition between garage / race / result */}
+      <ScreenVeil
+        screenKey={inRace ? (raceResult ? 'result' : 'race') : 'garage'}
+        label={
+          inRace
+            ? raceResult
+              ? 'Bandeirada final'
+              : `${selectedTrack.name.split('—')[0].trim()} • ${selectedMode === 'drift' ? 'Drift' : 'Corrida'}`
+            : 'Garagem'
+        }
+      />
       {/* Live 3D VELOCITY ENGINE WebGL2 Canvas */}
       <div
         ref={viewportRef}
@@ -320,14 +453,17 @@ export const App: React.FC = () => {
               <span
                 style={{
                   background: 'linear-gradient(90deg, #ff3b30, #ff9500)',
-                  padding: '4px 9px',
+                  padding: '5px 9px',
                   borderRadius: 6,
                   fontWeight: 900,
                   fontSize: 12,
                   letterSpacing: 1,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 5,
                 }}
               >
-                VELOCITY ENGINE v1.0
+                <Zap size={13} /> VELOCITY ENGINE
               </span>
               <div>
                 <div style={{ fontWeight: 900, fontSize: 15, letterSpacing: 0.8 }}>
@@ -340,10 +476,15 @@ export const App: React.FC = () => {
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
-              <span style={{ color: '#06d6a0', fontWeight: 900 }}>
-                💰 V$ {credits.toLocaleString('pt-BR')}
+              <span style={{ color: '#06d6a0', fontWeight: 900, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Wallet size={14} /> V$ {credits.toLocaleString('pt-BR')}
               </span>
-              <span style={{ color: '#ffbe0b', fontWeight: 800 }}>🏆 {trophyCount} Troféus</span>
+              <span style={{ color: '#ffbe0b', fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                <Trophy size={14} /> {trophyCount} Troféus
+              </span>
+              <button onClick={() => setShowSettings(true)} style={topChip} title="Configurações">
+                <Settings size={13} style={{ verticalAlign: -2 }} /> Ajustes
+              </button>
 
               <select
                 value={garageTier}
@@ -351,32 +492,18 @@ export const App: React.FC = () => {
                 style={topChip}
                 title="Evolução da Garagem 3D"
               >
-                <option value={1}>🏚️ Nível 1: Galpão Raiz</option>
-                <option value={2}>🔧 Nível 2: Oficina Pro</option>
-                <option value={3}>💎 Nível 3: Showroom Mônaco</option>
-              </select>
-
-              <select
-                value={colorblindMode}
-                onChange={(e) => setColorblindMode(e.target.value as ColorblindMode)}
-                style={topChip}
-                title="Acessibilidade Visual (Seção 8.2)"
-              >
-                <option value="none">👁️ Cores Padrão</option>
-                <option value="protanopia">👁️ Protanopia</option>
-                <option value="deuteranopia">👁️ Deuteranopia</option>
-                <option value="tritanopia">👁️ Tritanopia</option>
+                <option value={1}>Garagem 1 — Galpão</option>
+                <option value={2}>Garagem 2 — Oficina Pro</option>
+                <option value={3}>Garagem 3 — Showroom Mônaco</option>
               </select>
 
               <button
-                onClick={() => {
-                  const next = !muted;
-                  setMuted(next);
-                  audioEngine.setMuted(next);
-                }}
-                style={topChip}
+                onClick={() => setSettings((s0) => ({ ...s0, muted: !s0.muted }))}
+                style={{ ...topChip, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                title="Silenciar / ativar áudio"
               >
-                {muted ? '🔇 Mudo' : '🔊 Áudio 3D'}
+                {muted ? <VolumeX size={13} /> : <Volume2 size={13} />}
+                {muted ? 'Mudo' : 'Áudio 3D'}
               </button>
             </div>
           </div>
@@ -429,7 +556,7 @@ export const App: React.FC = () => {
                 }}
                 style={inspectBtn}
               >
-                🚪 {doorsOpen ? 'Fechar Portas' : 'Abrir Portas'}
+                <DoorOpen size={13} /> {doorsOpen ? 'Fechar portas' : 'Abrir portas'}
               </button>
               <button
                 onClick={() => {
@@ -439,7 +566,7 @@ export const App: React.FC = () => {
                 }}
                 style={inspectBtn}
               >
-                🔩 {hoodOpen ? 'Fechar Capô' : 'Ver Motor 3D'}
+                <Wrench size={13} /> {hoodOpen ? 'Fechar capô' : 'Ver motor 3D'}
               </button>
               <button
                 onClick={() => {
@@ -449,13 +576,13 @@ export const App: React.FC = () => {
                 }}
                 style={inspectBtn}
               >
-                🔊 {trunkOpen ? 'Fechar Mala' : 'Ver Som'}
+                <Speaker size={13} /> {trunkOpen ? 'Fechar mala' : 'Ver som'}
               </button>
               <button
                 onClick={() => engineRef.current?.revEngineInGarage()}
                 style={{ ...inspectBtn, borderColor: '#ff3b30', color: '#ff9500' }}
               >
-                🔥 LIGAR & CORTAR GIRO!
+                <Flame size={13} /> Ligar & cortar giro
               </button>
               <button
                 onClick={() => {
@@ -465,12 +592,12 @@ export const App: React.FC = () => {
                 }}
                 style={{ ...inspectBtn, borderColor: '#00f5d4', color: '#00f5d4' }}
               >
-                🌬️ {cfdVisible ? 'CFD ON' : 'Fluxo CFD'}
+                <Wind size={13} /> {cfdVisible ? 'CFD ativo' : 'Fluxo CFD'}
               </button>
             </div>
 
             <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 8 }}>
-              💡 Refletores do Showroom: {spotIntensity}W
+              Refletores do showroom: {spotIntensity}W
               <input
                 type="range"
                 min={8}
@@ -487,16 +614,16 @@ export const App: React.FC = () => {
 
             {/* Quick Iconic Showcase Presets */}
             <div style={{ fontSize: 10, color: '#38bdf8', fontWeight: 800, marginBottom: 5 }}>
-              ⚡ ATALHOS DE DESTAQUE DO PRODUTOR:
+ATALHOS DE DESTAQUE
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
               {[
-                ['fiat-uno-2005-raiz', '🇧🇷 Uno 2005 s/ Ar'],
-                ['orig-solis-tupa-x1', '🚀 Solis-Tupã MG'],
-                ['mercedes-300sl-gullwing', '🦅 300SL Gullwing'],
-                ['mclaren-mp4-4-senna', '🏆 Senna MP4/4'],
-                ['revolt-toyeca-pro', '🕹️ Toyeca Re-Volt'],
-                ['bugatti-chiron-300', '💎 Chiron 300+'],
+                ['fiat-uno-2005-raiz', 'Uno 2005 s/ Ar'],
+                ['orig-solis-tupa-x1', 'Solis-Tupã MG'],
+                ['mercedes-300sl-gullwing', '300SL Gullwing'],
+                ['mclaren-mp4-4-senna', 'Senna MP4/4'],
+                ['revolt-toyeca-pro', 'Toyeca Re-Volt'],
+                ['bugatti-chiron-300', 'Chiron 300+'],
               ].map(([cid, label]) => {
                 const found = CAR_CATALOG.find((c) => c.id === cid);
                 if (!found) return null;
@@ -539,25 +666,25 @@ export const App: React.FC = () => {
             }}
           >
             <button onClick={() => setActiveModal('cars')} style={dockBtn}>
-              🚗 {CAR_CATALOG.length} Carros & Puzzles
+              <Car size={15} /> {CAR_CATALOG.length} Carros & Puzzles
             </button>
             <button onClick={() => setActiveModal('tuning')} style={dockBtn}>
-              🔧 Customização & CFD
+              <Wrench size={15} /> Customização & CFD
             </button>
             <button onClick={() => setActiveModal('tracks')} style={dockBtn}>
-              🌍 {TRACK_CATALOG.length} Pistas & 47 Climas
+              <Globe size={15} /> {TRACK_CATALOG.length} Pistas & 47 Climas
             </button>
             <button onClick={() => setActiveModal('career')} style={dockBtn}>
-              🎬 Carreira & 200 Bots
+              <Clapperboard size={15} /> Carreira & 200 Bots
             </button>
             <button onClick={() => setActiveModal('editor')} style={dockBtn}>
-              🛠️ Editor de Pistas
+              <Hammer size={15} /> Editor de Pistas
             </button>
             <button onClick={() => setActiveModal('soundtrack')} style={dockBtn}>
-              🎵 Playlist da Viagem
+              <Music2 size={15} /> Playlist da Viagem
             </button>
             <button onClick={() => setActiveModal('companion')} style={dockBtn}>
-              📱 Companion App
+              <Smartphone size={15} /> Companion App
             </button>
 
             <button
@@ -592,7 +719,7 @@ export const App: React.FC = () => {
                 boxShadow: '0 0 26px rgba(255, 59, 48, 0.55)',
               }}
             >
-              🚦 START — CORRER EM {selectedTrack.name.split('—')[0].trim().toUpperCase()}!
+              <Play size={16} /> START — CORRER EM {selectedTrack.name.split('—')[0].trim().toUpperCase()}!
             </button>
           </div>
         </>
@@ -765,8 +892,25 @@ export const App: React.FC = () => {
             engineRef.current?.setPsxRetroMode(next);
           }}
           onBackToGarage={returnToGarage}
+          onTogglePause={() => engineRef.current?.setPaused(!paused)}
+          onHorn={() => audioEngine.horn()}
+          minimap={minimapData}
           onTouchInput={(p) => engineRef.current?.setTouchInput(p)}
         />
+      )}
+
+      {/* Pause menu */}
+      {inRace && paused && !photoMode && !raceResult && !sheepDisqualified && (
+        <PauseMenu
+          onResume={() => engineRef.current?.setPaused(false)}
+          onRestart={() => launchRaceSession()}
+          onQuit={returnToGarage}
+        />
+      )}
+
+      {/* Settings */}
+      {showSettings && (
+        <SettingsModal settings={settings} onChange={setSettings} onClose={() => setShowSettings(false)} />
       )}
 
       {inRace && showTelemetry && telemetryFrame && !photoMode && (
@@ -841,7 +985,9 @@ export const App: React.FC = () => {
       {sheepDisqualified && (
         <div style={centerOverlay}>
           <div style={{ ...resultCard, borderColor: '#ef233c' }}>
-            <div style={{ fontSize: 44 }}>🐑🛑</div>
+            <div className="vu-result-badge" style={{ borderColor: 'rgba(239,35,60,0.5)' }}>
+              <ShieldAlert size={34} color="#ef233c" />
+            </div>
             <h2 style={{ color: '#ef233c', margin: '8px 0' }}>
               CORRIDA ENCERRADA — RESPEITO AOS ANIMAIS!
             </h2>
@@ -850,10 +996,10 @@ export const App: React.FC = () => {
             </p>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
               <button onClick={() => launchRaceSession()} style={dockBtn}>
-                🔄 Tentar Novamente Desviando com Carinho
+                <RotateCcw size={15} /> Tentar novamente desviando
               </button>
               <button onClick={returnToGarage} style={dockBtn}>
-                🏠 Voltar à Garagem 3D
+                <Home size={15} /> Voltar à garagem
               </button>
             </div>
           </div>
@@ -864,8 +1010,20 @@ export const App: React.FC = () => {
       {raceResult && (
         <div style={centerOverlay}>
           <div style={resultCard}>
-            <div style={{ fontSize: 44 }}>
-              {raceResult.position === 1 ? '🏆🥇' : raceResult.position <= 3 ? '🥈🍾' : '🏁'}
+            <div
+              className="vu-result-badge"
+              style={{
+                borderColor:
+                  raceResult.position === 1
+                    ? 'rgba(255,190,11,0.55)'
+                    : 'rgba(255,255,255,0.18)',
+              }}
+            >
+              {raceResult.position === 1 ? (
+                <Trophy size={34} color="#ffbe0b" />
+              ) : (
+                <Flag size={34} color={raceResult.position <= 3 ? '#cbd5e1' : '#94a3b8'} />
+              )}
             </div>
             <h2 style={{ margin: '6px 0' }}>
               BANDEIRADA FINAL — {raceResult.position}º LUGAR DE {raceResult.totalRacers}!
@@ -881,7 +1039,7 @@ export const App: React.FC = () => {
             </div>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
               <button onClick={() => launchRaceSession()} style={dockBtn}>
-                🔁 Correr Revanche
+                <RotateCcw size={15} /> Correr revanche
               </button>
               <button
                 onClick={returnToGarage}
@@ -891,7 +1049,7 @@ export const App: React.FC = () => {
                   border: 'none',
                 }}
               >
-                🏠 Celebrar na Garagem 3D
+                <Home size={15} /> Celebrar na garagem
               </button>
             </div>
           </div>
@@ -913,6 +1071,7 @@ const topChip: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 700,
   cursor: 'pointer',
+  fontFamily: 'inherit',
 };
 
 const statCard: React.CSSProperties = {
@@ -927,11 +1086,16 @@ const inspectBtn: React.CSSProperties = {
   background: 'rgba(255,255,255,0.07)',
   border: '1px solid rgba(255,255,255,0.18)',
   color: '#f8fafc',
-  padding: '5px 9px',
-  borderRadius: 6,
+  padding: '6px 10px',
+  borderRadius: 8,
   fontSize: 11,
   fontWeight: 700,
   cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 6,
+  fontFamily: 'inherit',
+  transition: 'background 140ms ease, border-color 140ms ease',
 };
 
 const dockBtn: React.CSSProperties = {
@@ -943,6 +1107,10 @@ const dockBtn: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 800,
   cursor: 'pointer',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 7,
+  fontFamily: 'inherit',
 };
 
 const centerOverlay: React.CSSProperties = {

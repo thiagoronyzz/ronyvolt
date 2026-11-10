@@ -1,0 +1,764 @@
+/**
+ * VELOCITY UNCHAINED — design system
+ * ----------------------------------
+ * One cohesive sporty theme: deep asphalt navy, a single amber accent and a
+ * red secondary. Archivo (self-hosted via @fontsource) for display type,
+ * tabular numerals for telemetry. Every surface uses the same panel, button
+ * and chip language so the game reads as one product instead of a pile of
+ * inline styles.
+ */
+
+:root {
+  --vu-bg: #05070c;
+  --vu-panel: rgba(9, 13, 24, 0.88);
+  --vu-panel-solid: #0b1120;
+  --vu-panel-2: rgba(255, 255, 255, 0.05);
+  --vu-border: rgba(255, 255, 255, 0.13);
+  --vu-border-strong: rgba(255, 255, 255, 0.22);
+  --vu-text: #f4f7ff;
+  --vu-muted: #94a3b8;
+  --vu-faint: #64748b;
+  --vu-accent: #ff9500;
+  --vu-accent-2: #ff3b30;
+  --vu-accent-grad: linear-gradient(90deg, #ff3b30, #ff9500);
+  --vu-ok: #06d6a0;
+  --vu-info: #38bdf8;
+  --vu-danger: #ef233c;
+  --vu-radius: 12px;
+  --vu-radius-lg: 16px;
+  --vu-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  --vu-font: 'Archivo', 'Segoe UI', system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+  --vu-mono: 'Archivo', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  font-family: var(--vu-font);
+  background: var(--vu-bg);
+  color: var(--vu-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- Buttons ------------------------------------------------------------- */
+
+.vu-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--vu-panel-2);
+  border: 1px solid var(--vu-border-strong);
+  color: var(--vu-text);
+  padding: 9px 14px;
+  border-radius: 10px;
+  font-family: var(--vu-font);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  white-space: nowrap;
+}
+
+.vu-btn:hover {
+  background: rgba(255, 255, 255, 0.11);
+  border-color: rgba(255, 255, 255, 0.32);
+}
+
+.vu-btn:active {
+  transform: translateY(1px);
+}
+
+.vu-btn:focus-visible {
+  outline: 2px solid var(--vu-accent);
+  outline-offset: 2px;
+}
+
+.vu-btn-primary {
+  background: var(--vu-accent-grad);
+  border: none;
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 6px 22px rgba(255, 59, 48, 0.35);
+}
+
+.vu-btn-primary:hover {
+  background: var(--vu-accent-grad);
+  filter: brightness(1.1);
+}
+
+.vu-btn-danger {
+  background: rgba(239, 35, 60, 0.85);
+  border-color: var(--vu-danger);
+}
+
+.vu-btn-icon {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 10px;
+}
+
+.vu-btn svg {
+  flex-shrink: 0;
+}
+
+/* --- Panels / modals ----------------------------------------------------- */
+
+.vu-panel {
+  background: var(--vu-panel);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--vu-border);
+  border-radius: var(--vu-radius-lg);
+  box-shadow: var(--vu-shadow);
+}
+
+.vu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(3, 6, 14, 0.78);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  animation: vu-fade-in 0.22s ease both;
+}
+
+.vu-modal {
+  width: min(760px, 96vw);
+  max-height: 92vh;
+  overflow-y: auto;
+  background: linear-gradient(160deg, #0b1120, #070b14);
+  border: 1px solid var(--vu-border);
+  border-radius: var(--vu-radius-lg);
+  padding: 20px;
+  color: #e2e8f0;
+  box-shadow: var(--vu-shadow);
+  animation: vu-rise 0.28s cubic-bezier(0.2, 0.9, 0.25, 1) both;
+}
+
+.vu-eyebrow {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--vu-accent);
+}
+
+.vu-title {
+  margin: 4px 0 2px;
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.vu-muted {
+  font-size: 12px;
+  color: var(--vu-muted);
+  line-height: 1.55;
+}
+
+/* --- Forms --------------------------------------------------------------- */
+
+.vu-input,
+.vu-select {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--vu-border);
+  border-radius: 8px;
+  color: #fff;
+  padding: 8px 10px;
+  font-family: var(--vu-font);
+  font-size: 12px;
+  outline: none;
+}
+
+.vu-input:focus,
+.vu-select:focus {
+  border-color: var(--vu-accent);
+}
+
+.vu-select option {
+  background: #0b1120;
+  color: #fff;
+}
+
+.vu-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: #cbd5e1;
+}
+
+.vu-slider-row input[type='range'] {
+  flex: 1;
+  accent-color: var(--vu-accent);
+  min-width: 0;
+}
+
+.vu-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #cbd5e1;
+  cursor: pointer;
+  user-select: none;
+}
+
+.vu-toggle input {
+  accent-color: var(--vu-accent);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+/* --- HUD ----------------------------------------------------------------- */
+
+.hud-topbar {
+  position: fixed;
+  top: 12px;
+  left: 14px;
+  right: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  pointer-events: none;
+  z-index: 25;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hud-cluster {
+  display: flex;
+  gap: 14px;
+  background: var(--vu-panel);
+  backdrop-filter: blur(8px);
+  padding: 8px 16px;
+  border-radius: var(--vu-radius);
+  border: 1px solid var(--vu-border);
+  pointer-events: auto;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.hud-stat-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--vu-muted);
+  text-transform: uppercase;
+}
+
+.hud-stat-value {
+  font-size: 20px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.hud-actions {
+  display: flex;
+  gap: 6px;
+  pointer-events: auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.hud-tacho {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  width: 265px;
+  background: var(--vu-panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--vu-border);
+  border-radius: var(--vu-radius-lg);
+  padding: 12px 16px;
+  z-index: 25;
+}
+
+.hud-radio {
+  position: fixed;
+  bottom: 22px;
+  left: 16px;
+  width: min(370px, 55vw);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+  z-index: 25;
+}
+
+.hud-pedals {
+  position: fixed;
+  bottom: 150px;
+  right: 18px;
+  display: flex;
+  gap: 8px;
+  z-index: 25;
+}
+
+.hud-miniplayer {
+  position: fixed;
+  /* Sits on the bottom edge, left of the tachometer (short screens move it). */
+  bottom: 18px;
+  left: 18px;
+  width: min(460px, 92vw);
+  z-index: 26;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--vu-panel);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--vu-border);
+  border-radius: 999px;
+  box-shadow: var(--vu-shadow);
+}
+
+.hud-miniplayer .vu-btn-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+}
+
+.hud-miniplayer input[type='range'] {
+  accent-color: var(--vu-accent);
+  width: 84px;
+}
+
+/* --- Animations ---------------------------------------------------------- */
+
+@keyframes vu-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes vu-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes vu-screen-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.vu-screen-enter {
+  animation: vu-screen-in 0.35s ease both;
+}
+
+.vu-eq {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+}
+
+.vu-eq span {
+  width: 3px;
+  background: var(--vu-accent);
+  border-radius: 2px;
+  animation: vu-eq-bounce 0.9s ease-in-out infinite;
+}
+
+.vu-eq span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.vu-eq span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes vu-eq-bounce {
+  0%,
+  100% {
+    height: 4px;
+  }
+  50% {
+    height: 12px;
+  }
+}
+
+/* --- Responsive (phones / small windows) --------------------------------- */
+
+@media (max-width: 760px) {
+  .hud-topbar {
+    top: 8px;
+    left: 8px;
+    right: 8px;
+  }
+
+  .hud-cluster {
+    gap: 10px;
+    padding: 6px 12px;
+  }
+
+  .hud-stat-value {
+    font-size: 16px;
+  }
+
+  .hud-tacho {
+    width: 190px;
+    bottom: 84px;
+    right: 10px;
+    padding: 8px 12px;
+  }
+
+  .hud-radio {
+    display: none;
+  }
+
+  .hud-pedals {
+    bottom: 250px;
+    right: 10px;
+  }
+
+  .hud-miniplayer {
+    bottom: 10px;
+    width: calc(100vw - 20px);
+  }
+
+  .hud-miniplayer input[type='range'] {
+    width: 56px;
+  }
+
+  .vu-modal {
+    padding: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vu-overlay,
+  .vu-modal,
+  .vu-screen-enter,
+  .vu-eq span {
+    animation: none;
+  }
+}
+
+
+/* --- HUD collision avoidance -------------------------------------------- */
+
+/* Short viewports (laptops in landscape, phones rotated): the tacho and the
+   mini-player would otherwise overlap at the bottom edge. Stack them and
+   shrink the pedals. */
+@media (max-height: 520px) {
+  .hud-tacho {
+    width: 210px;
+    bottom: 8px;
+    right: 8px;
+    padding: 6px 10px;
+  }
+
+  .hud-miniplayer {
+    bottom: 8px;
+    left: 8px;
+    max-width: calc(100vw - 240px);
+  }
+
+  .hud-pedals {
+    bottom: 96px;
+    right: 8px;
+  }
+
+  .hud-topbar {
+    top: 6px;
+  }
+
+  .hud-cluster {
+    padding: 4px 10px;
+    gap: 8px;
+  }
+
+  .hud-stat-value {
+    font-size: 15px;
+  }
+}
+
+/* Narrow phones: keep the mini-player above the tacho instead of beside it. */
+@media (max-width: 520px) {
+  .hud-miniplayer {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-width: none;
+    bottom: 8px;
+    border-radius: 14px;
+  }
+
+  .hud-tacho {
+    bottom: 76px;
+  }
+
+  .hud-pedals {
+    bottom: 200px;
+  }
+}
+
+/* Wide ultrawide screens: keep the clusters from drifting into the corners. */
+@media (min-aspect-ratio: 21/9) {
+  .hud-topbar {
+    left: max(14px, calc((100vw - 1800px) / 2));
+    right: max(14px, calc((100vw - 1800px) / 2));
+  }
+}
+
+/* --- Result / podium screen --------------------------------------------- */
+
+.vu-result-badge {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 6px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 2px solid var(--vu-border-strong);
+  background: radial-gradient(circle at 50% 35%, rgba(255, 190, 11, 0.18), rgba(0, 0, 0, 0.35));
+  box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.6);
+}
+
+/* --- Minimap ------------------------------------------------------------- */
+
+.hud-map {
+  position: fixed;
+  /* Under the position cluster, top-left; the cluster is ~64px tall. */
+  top: 78px;
+  left: 14px;
+  width: 132px;
+  height: 132px;
+  z-index: 24;
+  padding: 6px;
+  border-radius: var(--vu-radius);
+  border: 1px solid var(--vu-border);
+  background: var(--vu-panel);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--vu-shadow);
+  pointer-events: none;
+}
+
+.hud-map svg {
+  display: block;
+  overflow: visible;
+}
+
+.hud-map-progress {
+  position: absolute;
+  right: 8px;
+  bottom: 6px;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--vu-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 760px) {
+  .hud-map {
+    width: 92px;
+    height: 92px;
+    top: 70px;
+    left: 8px;
+  }
+}
+
+@media (max-height: 520px) {
+  .hud-map {
+    width: 78px;
+    height: 78px;
+    top: 58px;
+  }
+}
+
+/* --- Screen transition veil --------------------------------------------- */
+
+.vu-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 44;
+  display: grid;
+  place-items: center;
+  background: radial-gradient(circle at 50% 40%, #0b1424, #05070c 70%);
+  pointer-events: none;
+  animation: vu-veil-in 180ms ease-out both;
+}
+
+.vu-veil.is-fading {
+  animation: vu-veil-out 520ms ease-in both;
+}
+
+@keyframes vu-veil-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes vu-veil-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+.vu-veil-mark {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.vu-veil-bar {
+  width: 96px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--vu-accent-grad);
+  transform-origin: left center;
+  animation: vu-veil-bar 620ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes vu-veil-bar {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.vu-veil-label {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--vu-muted);
+}
+
+/* --- Start lights -------------------------------------------------------- */
+
+.hud-startlights {
+  position: fixed;
+  top: 18%;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 14px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: rgba(5, 7, 12, 0.72);
+  border: 1px solid var(--vu-border);
+  backdrop-filter: blur(6px);
+  z-index: 27;
+  pointer-events: none;
+}
+
+.hud-startlights span {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.hud-startlights span.on {
+  background: #ff3b30;
+  box-shadow: 0 0 14px rgba(255, 59, 48, 0.85);
+  animation: vu-light 1s steps(2, end) infinite;
+}
+
+@keyframes vu-light {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.35; }
+}
+
+/* --- Tyres & damage readout --------------------------------------------- */
+
+.hud-damage {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.hud-damage .seg {
+  flex: 1;
+  position: relative;
+  height: 26px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
+}
+
+.hud-damage .seg span {
+  display: block;
+  width: 100%;
+  border-radius: 5px 5px 0 0;
+  transition: height 160ms ease, background 160ms ease;
+}
+
+.hud-damage .seg em {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.75);
+  text-shadow: 0 1px 2px #000;
+}
+
+.hud-tyres {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.hud-tyres .tyre {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.hud-tyres .tyre b {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 760px) {
+  .hud-tyres {
+    display: none;
+  }
+}
