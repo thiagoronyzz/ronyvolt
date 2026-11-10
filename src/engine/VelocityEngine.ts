@@ -404,7 +404,11 @@ export class VelocityEngine {
 
     this.garageRig = buildCarMesh(params.car, params.tune);
     // Sits on the 11 cm plinth, so the tyres touch its top surface.
-    this.garageRig.root.position.y = 0.115;
+    // The car sits on the plinth, not through it: the plinth surface is at
+    // y = 0.11, and the rig's own origin is the ground line, so the offset is
+    // the plinth height plus the tyre sink. Leaving it at 0.115 put the wheels
+    // 5 mm *into* the disc, and the contact shadow then read as a floating car.
+    this.garageRig.root.position.y = 0.112;
     this.garageTurntable.add(this.garageRig.root);
 
     // Mercedes 300SL Gullwing automatic door presentation Easter Egg!
