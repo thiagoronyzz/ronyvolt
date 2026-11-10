@@ -221,7 +221,7 @@ export function renderScene(tris, opts) {
   const p0 = new THREE.Vector4();
   const p1 = new THREE.Vector4();
   const p2 = new THREE.Vector4();
-  const nrm = new THREE.Vector3();
+  const nrmTmp = new THREE.Vector3();
   const e1 = new THREE.Vector3();
   const triN = new THREE.Vector3();
   const e2 = new THREE.Vector3();
@@ -231,7 +231,11 @@ export function renderScene(tris, opts) {
     if (t.opacity < 0.02) continue;
     // Backface: cull if the face points away, unless it is double sided (we
     // approximate by culling nothing for transparent glass-like materials).
-    nrm.copy(t.n);
+    // NOTE: shading must use its own normal vector. The winding fix below
+    // flips it per triangle, and sharing one scratch vector silently leaked the
+    // previous triangle's orientation into the next one - which is why the old
+    // previews showed dark blotches on white paint.
+    const nrm = nrmTmp.copy(t.n);
     e1.subVectors(t.a, cam.position);
     if (!t.transparent && nrm.dot(e1) > 0) continue;
 
@@ -271,11 +275,11 @@ export function renderScene(tris, opts) {
     }
     if (poly.length < 3) continue;
     for (let pi = 1; pi + 1 < poly.length; pi++) {
-      drawTri(poly[0], poly[pi], poly[pi + 1], t);
+      drawTri(poly[0], poly[pi], poly[pi + 1], t, nrm);
     }
   }
 
-  function drawTri(P0, P1, P2, t) {
+  function drawTri(P0, P1, P2, t, nrm) {
     const p0 = P0, p1 = P1, p2 = P2;
     if (p0.w <= 0.02 || p1.w <= 0.02 || p2.w <= 0.02) return;
     const iw0 = 1 / p0.w, iw1 = 1 / p1.w, iw2 = 1 / p2.w;

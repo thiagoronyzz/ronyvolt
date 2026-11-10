@@ -389,9 +389,31 @@ function buildShutLine(
 // ---------------------------------------------------------------------------
 
 export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
+  /**
+   * Roll centre height. A car does not roll about its centre of mass: the body
+   * rotates about the roll axis, which for a road car sits 60-140 mm above the
+   * ground. Rolling about the wrong point makes the body swing sideways instead
+   * of leaning, and makes one side of the car sink into the road.
+   */
+  const ROLL_CENTRE_Y = 0.11;
+  /** Pitch axis: the body rotates about a line through the centre of mass. */
+  const PITCH_CENTRE_Y = 0.55;
   const root = new THREE.Group();
   const chassisGroup = new THREE.Group();
-  root.add(chassisGroup);
+  /**
+   * Wheels live in their own group, attached to the root rather than to the
+   * chassis.
+   *
+   * This is the single most visible cornering bug in a car renderer: if the
+   * wheels are children of the rolling body, then every degree of body roll also
+   * rolls the tyres, so the contact patch slides sideways, the wheels lift off
+   * the road on the inside of the corner, and the car looks like it is leaning
+   * on its rims. Real suspension keeps the wheel roughly perpendicular to the
+   * road and lets the body move relative to it - which is the whole point of
+   * having suspension.
+   */
+  const wheelGroup = new THREE.Group();
+  root.add(chassisGroup, wheelGroup);
 
   const isRC = car.category === 'rc_revolt';
   const isF1 = car.archetype === 'f1_openwheel';
@@ -401,6 +423,23 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     car.archetype === 'hypercar_aero' ||
     car.archetype === 'futuristic_concept';
   const isOpen = car.archetype === 'classic_1900_open' || car.archetype === 'classic_roadster';
+  /**
+   * A road car does not come out of the factory with a wing. The old build gave
+   * every car a 16 cm-high two-strut wing because the default tune ships
+   * `rearWingDeg: 7`, and that single detail - a shopping hatchback with a
+   * time-attack wing - is one of the strongest "this is a video game" signals in
+   * the whole scene. Wings are now limited to cars that would actually have one:
+   * racing categories, and road cars whose own tune says the angle is aggressive.
+   */
+  const isRaceCar =
+    car.category === 'formula_proto' ||
+    car.archetype === 'lmp_prototype' ||
+    car.archetype === 'rc_buggy' ||
+    car.archetype === 'hypercar_aero' ||
+    car.archetype === 'wedge_supercar';
+  const wantsWing = isRaceCar
+    ? true
+    : car.category !== 'popular_br' && car.category !== 'classics' && (tune.rearWingDeg > 9 || tune.bodykit !== 'stock');
 
   // ---- Tyre size ----------------------------------------------------------
   // Dimensioned the way a tyre is actually sold: section width, aspect ratio,
@@ -492,11 +531,18 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
 
   const wheels: THREE.Group[] = [];
   const frontWheelPivots: THREE.Group[] = [];
+  /** Per-wheel carriers, so the body attitude can be converted into travel. */
+  const wheelMounts: { pivot: THREE.Group; baseY: number; x: number; z: number; camberRad: number }[] = [];
   const brakeGlowMats: THREE.MeshStandardMaterial[] = [discMat];
 
-  // Track width: real cars run the tyre's centreline slightly inboard of the
-  // widest body point, so the sidewall is flush with the arch lip, not past it.
-  const trackX = shape.width / 2 - tireWidthM * 0.42;
+  // Track width.
+  //
+  // A tyre's outer sidewall sits flush with the arch lip on a road car, and
+  // slightly inside it on a road-legal race car. The old formula put the
+  // centreline 42% of the section width inboard of the *maximum* body width,
+  // which leaves the tyre proud wherever the body tapers - so the wheels stuck
+  // out of the flanks and the car looked like a toy with bolted-on tyres.
+  const trackX = shape.width / 2 - tireWidthM * 0.5 - 0.008;
   const coords: [number, number, boolean][] = [
     [-trackX, shape.axleFrontZ, true],
     [trackX, shape.axleFrontZ, true],
@@ -538,8 +584,9 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     steerPivot.rotation.z = THREE.MathUtils.degToRad(wx < 0 ? -camberDeg : camberDeg);
 
     steerPivot.add(built.root);
-    chassisGroup.add(steerPivot);
+    wheelGroup.add(steerPivot);
     wheels.push(built.spin);
+    wheelMounts.push({ pivot: steerPivot, baseY: hubY, x: wx, z: wz, camberRad: steerPivot.rotation.z });
     if (isFront) frontWheelPivots.push(steerPivot);
   });
 
@@ -819,7 +866,10 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   });
   for (const side of [-1, 1]) {
     const mirror = new THREE.Mesh(mirrorGeometry(), mats.paint);
-    mirror.position.set(side * (shape.width * 0.5 + 0.055), beltY + 0.09, cabinFrontZ + 0.04);
+    // Mounted on the glasshouse shoulder: the mirror head starts where the body
+    // actually ends at that height, so the stem is 2 cm long, not 6.
+    const shoulderX = shell.halfWidthAtZ(cabinFrontZ + 0.04);
+    mirror.position.set(side * (shoulderX * 0.99 + 0.045), beltY + 0.09, cabinFrontZ + 0.04);
     mirror.scale.setScalar(1.0);
     const glass = new THREE.Mesh(new THREE.CircleGeometry(0.036, 18), mirrorMat);
     glass.position.set(side * 0.004, 0, 0);
@@ -830,8 +880,8 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     const stem = new THREE.Mesh(
       sweptTube(
         [
-          { x: side * shape.width * 0.48, y: beltY + 0.05, z: cabinFrontZ + 0.03 },
-          { x: side * (shape.width * 0.5 + 0.03), y: beltY + 0.08, z: cabinFrontZ + 0.04 },
+          { x: side * shoulderX * 0.97, y: beltY + 0.05, z: cabinFrontZ + 0.03 },
+          { x: side * (shoulderX * 0.99 + 0.03), y: beltY + 0.08, z: cabinFrontZ + 0.04 },
         ],
         0.012,
         6
@@ -866,7 +916,8 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   });
   for (const side of [-1, 1]) {
     const handle = new THREE.Mesh(roundedSlab(0.1, 0.026, 0.03, 0.01, 6), handleMat);
-    handle.position.set(side * (shape.width * 0.492), shape.shoulderY - 0.045, cabinCentreZ + 0.1);
+    const handleZ = cabinCentreZ + 0.1;
+    handle.position.set(side * (shell.halfWidthAtZ(handleZ) * 0.995), shape.shoulderY - 0.045, handleZ);
     handle.rotation.y = Math.PI / 2;
     chassisGroup.add(handle);
   }
@@ -882,9 +933,22 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   });
   const noseZ = shape.length * 0.5;
   if (!isOpen && !isF1) {
-    const grille = new THREE.Mesh(new THREE.PlaneGeometry(shape.width * 0.42, shape.hoodY * 0.3), grilleMat);
-    grille.position.set(0, shape.floor + shape.hoodY * 0.34, noseZ - 0.005);
+    // The grille sits in the nose, not in front of it: its z comes from the
+    // surface probe and it is pulled 12 mm in, so the mesh reads as a recess.
+    const gY = shape.floor + shape.hoodY * 0.34;
+    const gW = Math.min(shape.width * 0.46, shell.halfWidthAtZ(noseZ - 0.3) * 1.05);
+    const gZ = shell.surfaceZAt(gW * 0.45, gY, true) - 0.012;
+    const grille = new THREE.Mesh(new THREE.PlaneGeometry(gW, shape.hoodY * 0.19), grilleMat);
+    grille.position.set(0, gY, gZ);
+    grille.rotation.y = Math.PI;
     chassisGroup.add(grille);
+    // Surround: a thin painted frame, which is what makes a grille look fitted.
+    const surround = new THREE.Mesh(
+      roundedSlab(gW * 1.06, shape.hoodY * 0.21, 0.03, 0.012, 6),
+      new THREE.MeshStandardMaterial({ color: 0x0a0c0f, roughness: 0.55, metalness: 0.2 })
+    );
+    surround.position.set(0, gY, gZ - 0.012);
+    chassisGroup.add(surround);
   }
 
   const hlColor =
@@ -932,8 +996,11 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
 
   for (const side of [-1, 1]) {
     const y = shape.floor + shape.hoodY * 0.42;
-    const x = side * shape.width * 0.345;
-    const z = noseZ - 0.02;
+    // Position on the *actual* nose surface: a headlight is 25-30% of the way
+    // out from the centreline, and at that x the nose has already narrowed, so
+    // using `width/2` put the lamps outside the bodywork.
+    const x = side * shell.halfWidthAtZ(noseZ - 0.25) * 0.62;
+    const z = shell.surfaceZAt(x, y, true) - 0.004;
     const l = new THREE.Mesh(lens, lensMat);
     l.position.set(x, y, z);
     l.rotation.y = side > 0 ? 0.12 : -0.12;
@@ -951,6 +1018,11 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   }
 
   // ---- Tail lights --------------------------------------------------------
+  //
+  // These used to be two `PlaneGeometry` slabs 30 cm wide with a box bezel,
+  // placed at `z = -length/2`, i.e. *outside* the body: because the body tapers
+  // at the tail, the planes floated in mid-air as two black bricks. They are now
+  // placed on the real tail surface and sized from the real tail width.
   const tailTex = taillightTexture();
   const tailMat = new THREE.MeshStandardMaterial({
     color: 0xff2a3c,
@@ -964,23 +1036,40 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     opacity: 0.95,
   });
   const brakeMat = new THREE.MeshStandardMaterial({ color: 0x1a0407, roughness: 0.4 });
-  for (const side of [-1, 1]) {
-    const tl = new THREE.Mesh(new THREE.PlaneGeometry(shape.width * 0.3, Math.max(0.05, shape.hoodY * 0.1)), tailMat);
-    tl.position.set(side * shape.width * 0.315, shape.deckY * 0.78, -shape.length * 0.5 + 0.012);
-    tl.rotation.y = Math.PI;
-    chassisGroup.add(tl);
-    // The bezel around a tail cluster is what gives it depth.
-    const bezel = new THREE.Mesh(roundedSlab(shape.width * 0.32, Math.max(0.06, shape.hoodY * 0.12), 0.02, 0.02, 6), brakeMat);
-    bezel.position.set(side * shape.width * 0.315, shape.deckY * 0.78, -shape.length * 0.5 + 0.004);
-    chassisGroup.add(bezel);
+  const tailZ = -shape.length * 0.5 + 0.055;
+  // Real width of the tail at lamp height, and how far back the surface sits.
+  const tailHalf = Math.min(shape.width * 0.42, shell.halfWidthAtZ(tailZ) * 0.86);
+  const lampH = Math.max(0.055, Math.min(0.13, (shape.deckY - shape.floor) * 0.2));
+  const lampY = shape.deckY * 0.76;
+  if (!isOpen) {
+    for (const side of [-1, 1]) {
+      const tl = new THREE.Mesh(new THREE.PlaneGeometry(tailHalf * 0.62, lampH), tailMat);
+      tl.position.set(side * tailHalf * 0.52, lampY, tailZ - 0.005);
+      tl.rotation.y = Math.PI;
+      tl.rotation.x = -0.06;
+      chassisGroup.add(tl);
+      // Recessed housing: a shallow tray a few millimetres proud of the paint,
+      // which is what gives the cluster a shadow line instead of a floating glow.
+      const housing = new THREE.Mesh(roundedSlab(tailHalf * 0.7, lampH * 1.5, 0.03, 0.012, 6), brakeMat);
+      housing.position.set(side * tailHalf * 0.52, lampY, tailZ + 0.012);
+      chassisGroup.add(housing);
+    }
+    // Centre garnish bar: most modern hatches and saloons have one, and it ties
+    // the two clusters into a single graphic.
+    const garnish = new THREE.Mesh(
+      roundedSlab(tailHalf * 0.42, lampH * 0.3, 0.022, 0.008, 5),
+      new THREE.MeshStandardMaterial({ color: 0x14060a, roughness: 0.35, metalness: 0.3 })
+    );
+    garnish.position.set(0, lampY, tailZ + 0.004);
+    chassisGroup.add(garnish);
   }
 
   // ---- Rear diffuser + exhausts ------------------------------------------
   const diffuser = new THREE.Mesh(
-    roundedSlab(shape.width * 0.72, Math.max(0.05, shape.floor * 0.7), 0.18, 0.02, 6),
+    roundedSlab(shape.width * 0.62, Math.max(0.05, shape.floor * 0.7), 0.14, 0.02, 6),
     new THREE.MeshStandardMaterial({ color: 0x0b0d10, roughness: 0.6, metalness: 0.3 })
   );
-  diffuser.position.set(0, shape.floor + 0.02, -shape.length * 0.47);
+  diffuser.position.set(0, shape.floor + 0.03, -shape.length * 0.455);
   chassisGroup.add(diffuser);
 
   const exhaustMat = new THREE.MeshPhysicalMaterial({
@@ -996,9 +1085,9 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     const spread = exhaustCount === 1 ? 0 : (e - (exhaustCount - 1) / 2) * 0.17;
     const tip = new THREE.Mesh(exhaustGeo, exhaustMat);
     tip.rotation.x = Math.PI / 2;
-    tip.position.set(spread, shape.floor + 0.07, -shape.length * 0.5 - 0.02);
+    tip.position.set(spread, shape.floor + 0.075, -shape.length * 0.5 + 0.04);
     const soot = new THREE.Mesh(new THREE.CircleGeometry(0.033, 16), sootMat);
-    soot.position.set(spread, shape.floor + 0.07, -shape.length * 0.5 - 0.03);
+    soot.position.set(spread, shape.floor + 0.075, -shape.length * 0.5 + 0.032);
     soot.rotation.y = Math.PI;
     chassisGroup.add(tip, soot);
   }
@@ -1017,7 +1106,7 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     clearcoatRoughness: 0.06,
   });
 
-  if (tune.rearWingDeg > 4 || tune.bodykit === 'time_attack_aero' || car.aeroCl > 2.4) {
+  if (wantsWing) {
     const wingGroup = new THREE.Group();
     // Aerofoil: an extruded inverted aerofoil section with a real camber.
     const airfoil = new THREE.Shape();
@@ -1051,12 +1140,15 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     chassisGroup.add(wingGroup);
   }
 
-  if (tune.frontWingDeg > 3 || tune.bodykit !== 'stock') {
+  if (isRaceCar || (tune.frontWingDeg > 8 && tune.bodykit !== 'stock')) {
+    const noseHalf = shell.halfWidthAtZ(shape.length * 0.45);
     const splitter = new THREE.Mesh(
-      roundedSlab(shape.width * 0.98, 0.024, 0.24, 0.01, 8),
+      roundedSlab(noseHalf * 2.04, 0.022, 0.2, 0.01, 8),
       carbonMat
     );
-    splitter.position.set(0, shape.floor + 0.005, shape.length * 0.47);
+    // Height above the road, and set back so it tucks under the bumper instead
+    // of sticking out in front of it like a shelf.
+    splitter.position.set(0, shape.floor - 0.01, shape.length * 0.44);
     chassisGroup.add(splitter);
   }
 
@@ -1124,15 +1216,25 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     clearcoat: 0.6,
   });
   const frameMat = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.6 });
-  const rearPlate = new THREE.Mesh(new THREE.PlaneGeometry(0.44, 0.145), plateMat);
-  rearPlate.position.set(0, shape.floor + 0.15, -shape.length * 0.5 - 0.006);
+  // Mercosul plates are 400 x 130 mm. They are placed on the *real* bumper
+  // surface: at 15 cm above the floor the body has already curved in, and
+  // putting the plate at ±length/2 left it hanging in the air in front of the
+  // nose (which is why it looked like a big white card floating over the road).
+  const PLATE_W = 0.4;
+  const PLATE_H = 0.13;
+  const rearPlateY = shape.floor + 0.17;
+  const rearPlateZ = shell.surfaceZAt(0, rearPlateY, false) - 0.004;
+  const rearPlate = new THREE.Mesh(new THREE.PlaneGeometry(PLATE_W, PLATE_H), plateMat);
+  rearPlate.position.set(0, rearPlateY, rearPlateZ);
   rearPlate.rotation.y = Math.PI;
-  const rearFrame = new THREE.Mesh(roundedSlab(0.47, 0.175, 0.012, 0.012, 6), frameMat);
-  rearFrame.position.set(0, shape.floor + 0.15, -shape.length * 0.5 - 0.002);
+  const rearFrame = new THREE.Mesh(roundedSlab(PLATE_W + 0.03, PLATE_H + 0.03, 0.012, 0.012, 6), frameMat);
+  rearFrame.position.set(0, rearPlateY, rearPlateZ + 0.006);
   chassisGroup.add(rearFrame, rearPlate);
 
-  const frontPlate = new THREE.Mesh(new THREE.PlaneGeometry(0.44, 0.145), plateMat);
-  frontPlate.position.set(0, shape.floor + 0.14, shape.length * 0.5 + 0.006);
+  const frontPlateY = shape.floor + 0.16;
+  const frontPlateZ = shell.surfaceZAt(0, frontPlateY, true) + 0.004;
+  const frontPlate = new THREE.Mesh(new THREE.PlaneGeometry(PLATE_W, PLATE_H), plateMat);
+  frontPlate.position.set(0, frontPlateY, frontPlateZ);
   chassisGroup.add(frontPlate);
 
   // ---- Rear sticker (kept: "Família Feliz" is part of the game's identity) -
@@ -1308,6 +1410,32 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     updateRealtimeVisuals(state) {
       for (const w of wheels) w.rotation.x = state.wheelSpinRad;
       for (const fp of frontWheelPivots) fp.rotation.y = state.steering * 0.42;
+
+      // ---- Suspension travel --------------------------------------------
+      //
+      // The wheels used to be bolted to the body, so the car leaned as one rigid
+      // block and the tyres stayed perfectly perpendicular to it — the single
+      // clearest "this is a toy" cue when cornering. Real corners have body roll
+      // *and* the outside wheels compressing while the inside ones extend.
+      //
+      // Each wheel carrier gets a vertical offset from the body attitude. It is
+      // the same roll/pitch decomposition the body uses, evaluated at that
+      // wheel's position, so it is automatically consistent with what the shell
+      // is doing.
+      const rollTravel = Math.sin(state.rollRad);
+      const pitchTravel = Math.sin(state.pitchRad);
+      for (let i = 0; i < wheelMounts.length; i++) {
+        const mount = wheelMounts[i];
+        const target = -mount.x * rollTravel - mount.z * pitchTravel * 0.35;
+        mount.pivot.position.y = mount.baseY + THREE.MathUtils.clamp(target, -0.07, 0.07);
+        // Camber gain: a real double-wishbone or strut gains a few tenths of a
+        // degree of negative camber as it compresses. It is small, but it is why
+        // the outside front wheel looks planted in a photograph of a cornering
+        // car rather than standing upright while the body leans over it.
+        const side = Math.sign(mount.x) || 1;
+        const compression = THREE.MathUtils.clamp(-target, -0.07, 0.07);
+        mount.pivot.rotation.z = mount.camberRad - side * (compression * 0.55);
+      }
       steeringWheelMesh.rotation.z = -state.steering * 1.9;
 
       const subShake =
@@ -1315,11 +1443,32 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
           ? Math.sin(performance.now() * 0.065) * state.bassEnergy * 0.01
           : 0;
 
-      // Body attitude: pitch about the rear axle-ish centre, roll about the
-      // roll centre — both small angles, as on a real car.
+      // ---- Body attitude -------------------------------------------------
+      //
+      // BUG FIXED HERE: `chassisGroup.rotation.z` is a *roll*, but rotating the
+      // group about its own origin (y = 0, the ground line) makes the whole body
+      // pivot about the road surface. Every degree of roll therefore translated
+      // the body sideways by ~ half its height, which is why the car looked like
+      // it was sliding rather than leaning in corners, and why the inner side
+      // sometimes clipped into the asphalt.
+      //
+      // The attitude is now applied about a real roll centre: rotate the group
+      // about the origin, then translate it back so that the point at
+      // (0, ROLL_CENTRE_Y, 0) stays fixed. That is the definition of a rotation
+      // about an axis, and it is two lines of algebra.
       chassisGroup.rotation.x = state.pitchRad;
       chassisGroup.rotation.z = state.rollRad;
-      chassisGroup.position.y = 0;
+      chassisGroup.rotation.y = 0;
+      // Rotating by roll about the origin moves the roll-centre point from
+      // (0, py, 0) to (py*sinR, py*cosR, 0). Translating by the difference puts
+      // that point back where it belongs, so the body leans about the roll axis
+      // instead of sliding sideways.
+      const roll = state.rollRad;
+      const pitch = state.pitchRad;
+      const axisY = ROLL_CENTRE_Y;
+      const movedX = -axisY * Math.sin(roll);
+      const movedY = axisY * Math.cos(roll) * Math.cos(pitch);
+      chassisGroup.position.set(-movedX, axisY - movedY, 0);
       void subShake;
 
       if (pineTreePivot) {
