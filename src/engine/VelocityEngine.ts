@@ -1438,6 +1438,12 @@ export class VelocityEngine {
     // Update Audio Engine
     const stats = computeEffectiveCarStats(this.currentCar, this.currentTune);
     audioEngine.setSurface(surfaceName, this.currentWeather.wetness);
+    // Music reacts to the car: the bed ducks under load and tightens its tempo
+    // slightly as speed builds. Small numbers, big difference in feel.
+    audioEngine.updateMusicDynamics(
+      rawThrottle * (0.45 + (this.playerBody.rpm / Math.max(1000, stats.maxRpm)) * 0.55),
+      speedKmh,
+    );
     audioEngine.updateFrame({
       rpm: this.playerBody.rpm,
       maxRpm: stats.maxRpm,
