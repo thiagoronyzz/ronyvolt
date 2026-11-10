@@ -202,6 +202,175 @@ interface CarMaterialSet {
 
 const MATERIAL_CACHE = new Map<string, CarMaterialSet>();
 
+/**
+ * VISUAL DAMAGE UNIFORMS
+ * ----------------------
+ * One set of uniforms shared by every car (only one car is visible at a time in
+ * the garage/race hero view, and the bots use the cheap variant), driving a
+ * shader that dents the paint and scratches it in normal space:
+ *
+ *   uDentFront / uDentRear  – crush of both ends (creates a crease line)
+ *   uDentLeft  / uDentRight – slide damage down each flank (elongated dents)
+ *   uDentHood               – hood buckle
+ *
+ * The offsets are applied in *view* space using the paint material's normal so
+ * the dents shade with the sun (a bump that catches light reads as a real dent,
+ * whereas scaling the mesh – what the old build did – reads as a squashed car).
+ */
+interface DamageUniforms {
+  uDentFront: { value: number };
+  uDentRear: { value: number };
+  uDentLeft: { value: number };
+  uDentRight: { value: number };
+  uDentHood: { value: number };
+  uScratch: { value: number };
+  uCorrosion: { value: number };
+}
+
+/**
+ * Per-material uniform sets. They must NOT be global: the paint materials are
+ * cached per car/tune, so a shared set would dent every other car on the grid
+ * whenever the player hit a wall.
+ */
+const DAMAGE_UNIFORMS = new WeakMap<THREE.Material, DamageUniforms>();
+
+/** Push the live DamageState of one car into that car's paint uniforms. */
+export function applyVisualDamage(
+  mat: THREE.Material,
+  damage: {
+    panelDeform: { frontLeft: number; frontRight: number; hood: number; sideLeft: number; sideRight: number; rear: number };
+    paintCorrosion: number;
+  }
+): void {
+  const u = DAMAGE_UNIFORMS.get(mat);
+  if (!u) return;
+  const d = damage.panelDeform;
+  u.uDentFront.value = Math.min(1, (d.frontLeft + d.frontRight) * 0.5);
+  u.uDentRear.value = d.rear;
+  u.uDentLeft.value = d.sideLeft;
+  u.uDentRight.value = d.sideRight;
+  u.uDentHood.value = d.hood;
+  u.uScratch.value = Math.min(
+    1,
+    Math.max(d.sideLeft, d.sideRight, (d.frontLeft + d.frontRight) * 0.5, d.rear) * 1.15
+  );
+  u.uCorrosion.value = damage.paintCorrosion;
+}
+
+function installDamageShader(mat: THREE.MeshPhysicalMaterial): void {
+  const damageUniforms: DamageUniforms = {
+    uDentFront: { value: 0 },
+    uDentRear: { value: 0 },
+    uDentLeft: { value: 0 },
+    uDentRight: { value: 0 },
+    uDentHood: { value: 0 },
+    uScratch: { value: 0 },
+    uCorrosion: { value: 0 },
+  };
+  DAMAGE_UNIFORMS.set(mat, damageUniforms);
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, damageUniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        varying vec3 vDamagePos;
+        varying vec3 vDamageNormal;`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vDamagePos = position;
+        vDamageNormal = normal;`
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        uniform float uDentFront;
+        uniform float uDentRear;
+        uniform float uDentLeft;
+        uniform float uDentRight;
+        uniform float uDentHood;
+        uniform float uScratch;
+        uniform float uCorrosion;
+        varying vec3 vDamagePos;
+        varying vec3 vDamageNormal;
+
+        // Cheap stable hash for the scratch pattern / paint flake noise.
+        float damageHash(vec3 p) {
+          return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453);
+        }
+        float damageNoise(vec3 p) {
+          vec3 i = floor(p);
+          vec3 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float n000 = damageHash(i);
+          float n100 = damageHash(i + vec3(1.0, 0.0, 0.0));
+          float n010 = damageHash(i + vec3(0.0, 1.0, 0.0));
+          float n110 = damageHash(i + vec3(1.0, 1.0, 0.0));
+          float n001 = damageHash(i + vec3(0.0, 0.0, 1.0));
+          float n101 = damageHash(i + vec3(1.0, 0.0, 1.0));
+          float n011 = damageHash(i + vec3(0.0, 1.0, 1.0));
+          float n111 = damageHash(i + vec3(1.0, 1.0, 1.0));
+          return mix(
+            mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+            mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+            f.z
+          );
+        }`
+      )
+      .replace(
+        '#include <normal_fragment_maps>',
+        `#include <normal_fragment_maps>
+        {
+          // Panel geometry: z is longitudinal (front = +z), x lateral, y up.
+          float longitudinal = vDamagePos.z;
+          float lateral = vDamagePos.x;
+          float height = vDamagePos.y;
+
+          // Front / rear crush: a crease that fades in from each bumper, plus
+          // a low-frequency buckle so the sheet metal reads as folded.
+          float frontMask = smoothstep(0.9, 0.0, abs(longitudinal - 1.9)) * step(0.0, longitudinal);
+          float rearMask = smoothstep(0.9, 0.0, abs(longitudinal + 1.9)) * step(longitudinal, 0.0);
+          float crease =
+            uDentFront * frontMask * (0.55 + 0.45 * sin(lateral * 9.0 + damageNoise(vDamagePos * 3.0) * 5.0))
+            + uDentRear * rearMask * (0.5 + 0.5 * sin(lateral * 7.0 - vDamagePos.y * 6.0));
+
+          // Flank damage: elongated dents along each side.
+          float sideMaskL = smoothstep(-0.95, -0.55, lateral);
+          float sideMaskR = smoothstep(0.55, 0.95, lateral);
+          float flank =
+            uDentLeft * sideMaskL * (0.6 + 0.4 * sin(longitudinal * 5.0))
+            + uDentRight * sideMaskR * (0.6 + 0.4 * sin(longitudinal * 5.0 + 1.3));
+
+          // Hood buckle: highest on the bonnet, fades down the nose.
+          float hoodMask = smoothstep(0.55, 1.05, height) * smoothstep(0.2, 1.4, longitudinal);
+          float hood = uDentHood * hoodMask;
+
+          float dent = clamp(crease + flank + hood, 0.0, 1.0) * 0.65;
+          // Perturb the shading normal by the dent gradient (view space here is
+          // close enough: the dents are shallow and this is a stylised pass).
+          normal = normalize(normal + vDamageNormal * dent * 0.9 - normalize(vDamagePos) * dent * 0.35);
+
+          // Scratches: fine directional striations where the paint was dragged,
+          // brighter on the impact zones, plus exposed primer (darker, matte).
+          float striation = sin((longitudinal * 34.0 + height * 9.0) + damageNoise(vDamagePos * 6.0) * 7.0);
+          float scratchMask = smoothstep(0.55, 0.95, striation) * uScratch * (0.35 + dent);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.42, 0.43, 0.45), clamp(scratchMask, 0.0, 1.0) * 0.75);
+
+          // Corrosion / missing clearcoat on heavily damaged paint.
+          float corrosion = uCorrosion * smoothstep(0.35, 0.8, damageNoise(vDamagePos * 2.2));
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.23, 0.18, 0.14), corrosion * 0.7);
+          roughnessFactor = clamp(roughnessFactor + corrosion * 0.5 + scratchMask * 0.35, 0.0, 1.0);
+        }`
+      );
+  };
+  // The shader names a helper used above; keep it local to the injected code.
+  mat.needsUpdate = true;
+}
+
 function materialSetFor(car: CarSpec, tune: CarTuneSetup, envIntensity = 1): CarMaterialSet {
   const key = `${tune.paintColor}|${tune.paintFinish}|${car.id}`;
   const hit = MATERIAL_CACHE.get(key);
@@ -246,6 +415,7 @@ function materialSetFor(car: CarSpec, tune: CarTuneSetup, envIntensity = 1): Car
   });
   // Paint UVs are metric (one tile per 1.6 m); a 4.6 m car therefore wants the
   // flake tile to repeat ~3x, which the UV generator already handles.
+  installDamageShader(paint);
 
   const glassMaps = windGlassMaps();
   const glass = new THREE.MeshPhysicalMaterial({
@@ -1569,6 +1739,7 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
         const mixed = baseColorObj.clone().lerp(hotColorObj, heatT);
         mats.paint.color.copy(mixed);
       }
+      applyVisualDamage(mats.paint, state.damage);
       if (state.damage.paintCorrosion > 0.01) {
         mats.paint.roughness = Math.min(0.92, 0.16 + state.damage.paintCorrosion * 0.7);
         mats.paint.clearcoat = Math.max(0.05, 1 - state.damage.paintCorrosion);
@@ -1576,11 +1747,12 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
 
       const frontCrush = (state.damage.panelDeform.frontLeft + state.damage.panelDeform.frontRight) * 0.5;
       const sideSkew = state.damage.panelDeform.sideLeft - state.damage.panelDeform.sideRight;
-      chassisGroup.scale.set(
-        1 - Math.abs(sideSkew) * 0.06,
-        1 + frontCrush * 0.03,
-        1 - frontCrush * 0.08
-      );
+      // NOTE: the body is deliberately NOT scaled anymore. Scaling the whole
+      // chassis shrank the wheelbase and made the car look like a toy that had
+      // been stepped on. The damage now lives in the paint shader
+      // (applyVisualDamage → dents + scratches), so the geometry stays intact.
+      void sideSkew;
+      void frontCrush;
 
       const showFlames = state.backfireActive || state.nitroActive;
       flameLeft.visible = showFlames;

@@ -253,6 +253,7 @@ const wrap: React.CSSProperties = {
   position: 'fixed',
   inset: '54px 18px 18px 18px',
   background: 'rgba(7, 11, 20, 0.96)',
+  fontFamily: 'var(--vu-font)',
   backdropFilter: 'blur(16px)',
   border: '1px solid rgba(6, 214, 160, 0.3)',
   borderRadius: 16,

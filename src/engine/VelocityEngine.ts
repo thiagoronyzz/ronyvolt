@@ -24,6 +24,9 @@ import { WEATHER_PRESETS } from '../data/weatherCatalog';
 import { audioEngine } from '../audio/VelocityAudioEngine';
 import { RealismRenderer } from '../render/RealismRenderer';
 import { buildRacingLine, RacingLine, RacingLineFollower } from '../ai/RacingLine';
+import { chaseBoom, computeChaseRoll, fitVerticalFov, speedFov } from './CameraRig';
+import { canSimulate, effectTraits, shouldPauseOnHide } from './GameStateRules';
+import { disposeObject3D } from './disposal';
 
 interface BotRacerInstance {
   profile: BotDriverProfile;
@@ -75,6 +78,8 @@ export interface EngineCallbacks {
     deliveries: number;
   }) => void;
   onSheepDisqualification: () => void;
+  /** Fired whenever the pause state changes (Esc/P, HUD button, auto-pause). */
+  onPauseChanged?: (paused: boolean) => void;
 }
 
 export class VelocityEngine {
@@ -93,8 +98,25 @@ export class VelocityEngine {
   private elapsedSec = 0;
 
   private sceneMode: 'garage' | 'race' = 'garage';
-  private isPaused = false;
+  // Pause state machine: user pause, photo mode and race termination are
+  // independent flags. The old single `isPaused` was written by all three
+  // systems, so closing photo mode silently unpaused a user pause (and the
+  // sheep-DQ pause leaked into the garage).
+  private userPaused = false;
+  private terminated = false;
   private psxRetroMode = false;
+  /** Incremented on every scene build; stale setTimeout callbacks check it. */
+  private sessionId = 0;
+  private resizeObserver: ResizeObserver | null = null;
+  // Quality / accessibility settings (Settings modal).
+  private pixelRatioCap = 2;
+  private cameraShakeEnabled = true;
+  private speedBlurEnabled = true;
+  private invertSteering = false;
+  private guardrailCooldown = 0;
+  private smoothedRoll = 0;
+  private snapCameraNextFrame = true;
+  private camTmp = new THREE.Vector3();
 
   // Garage Objects
   private garageTurntable: THREE.Group | null = null;
@@ -139,11 +161,53 @@ export class VelocityEngine {
   private playerRig: BuiltCarRig | null = null;
   private playerBody = new VehicleDynamicsBody(24);
   private bots: BotRacerInstance[] = [];
+
+  /**
+   * Static minimap data for the current circuit: centreline in world space
+   * (sampled every ~40 m) plus the player's current normalised lap progress.
+   * Cheap to read once per frame from React without touching Three.js objects.
+   */
+  public getMinimapData(): {
+    points: { x: number; z: number }[];
+    player: { x: number; z: number; heading: number };
+    progress: number;
+    blips: { x: number; z: number; kind: 'rival' | 'police' }[];
+  } | null {
+    if (!this.trackWorld || this.sceneMode !== 'race') return null;
+    const pts = this.trackWorld.samplePoints;
+    const stride = Math.max(1, Math.floor(pts.length / 160));
+    const points: { x: number; z: number }[] = [];
+    for (let i = 0; i < pts.length; i += stride) points.push({ x: pts[i].x, z: pts[i].z });
+    return {
+      points,
+      player: { x: this.playerBody.x, z: this.playerBody.z, heading: this.playerBody.headingRad },
+      progress: Math.max(0, Math.min(1, this.lastSplineProgress)),
+      blips: this.bots
+        .filter((b) => b.health > 0)
+        .slice(0, 12)
+        .map((b) => ({
+          // The rig root is authoritative: it already includes the lane offset.
+          x: b.rig.root.position.x,
+          z: b.rig.root.position.z,
+          kind: 'rival' as const,
+        })),
+    };
+  }
   private racingLine: RacingLine | null = null;
 
   // Weather & Smoke Particles
   private precipPoints: THREE.Points | null = null;
   private smokeParticles: { mesh: THREE.Mesh; life: number; vx: number; vy: number; vz: number }[] = [];
+  // Pooled particle meshes: geometries/materials are created once and reused,
+  // instead of allocating a new SphereGeometry + material per puff (which
+  // leaked GPU memory every frame of drifting).
+  private smokePool: THREE.Mesh[] = [];
+  private smokeGeo = new THREE.SphereGeometry(0.32, 6, 6);
+  private sparkGeo = new THREE.BoxGeometry(0.12, 0.12, 0.35);
+  // Pooled particle meshes: geometries/materials are created once and reused,
+  // instead of allocating a new SphereGeometry + material per puff (which
+  // leaked GPU memory every frame of drifting).
+
   private activeProjectiles: { mesh: THREE.Mesh; x: number; y: number; z: number; vx: number; vz: number; life: number }[] = [];
 
   // Ghost Car
@@ -236,13 +300,24 @@ export class VelocityEngine {
     this.scene.add(this.sunLight);
 
     this.bindEvents();
+    // Sync renderer + composer + camera aspect once everything exists, then
+    // keep them in sync via ResizeObserver (covers container changes, mobile
+    // URL-bar collapse and orientation flips that window resize misses).
+    this.handleResize();
+    if (typeof ResizeObserver !== 'undefined' && this.container) {
+      this.resizeObserver = new ResizeObserver(() => this.handleResize());
+      this.resizeObserver.observe(this.container);
+    }
     this.startLoop();
   }
 
   private bindEvents(): void {
     window.addEventListener('resize', this.handleResize);
+    window.addEventListener('orientationchange', this.handleResize);
     window.addEventListener('keydown', this.handleKeyDown);
     window.addEventListener('keyup', this.handleKeyUp);
+    window.addEventListener('blur', this.handleBlur);
+    document.addEventListener('visibilitychange', this.handleVisibility);
 
     const dom = this.renderer.domElement;
     dom.addEventListener('pointerdown', (e) => {
@@ -286,20 +361,64 @@ export class VelocityEngine {
     );
   }
 
+  private handleBlur = (): void => {
+    // Keys held when the window loses focus would otherwise stay "pressed"
+    // forever (car accelerating into a wall after alt-tab).
+    this.keys.clear();
+    this.touchControls.throttle = 0;
+    this.touchControls.brake = 0;
+    this.touchControls.steer = 0;
+  };
+
+  private handleVisibility = (): void => {
+    const pause = shouldPauseOnHide({
+      hidden: document.hidden,
+      sceneMode: this.sceneMode,
+      photoModeActive: this.photoModeActive,
+      terminated: this.terminated,
+    });
+    if (pause) this.setPaused(true);
+    // A hidden tab must not keep burning GPU: the render loop checks this.
+    if (document.hidden) this.keys.clear();
+  };
+
   private handleResize = (): void => {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
+    if (w < 2 || h < 2) return;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.setPsxRetroMode(this.psxRetroMode);
+    // The composer MUST be resized with the renderer. The old handler only
+    // resized the canvas, so after any resize the post-processing render
+    // target kept the old size and the image was stretched/squashed — the
+    // "tela desalinhada/distordida" bug.
+    if (this.psxRetroMode) {
+      const sw = Math.max(320, Math.floor(w / 3.2));
+      const sh = Math.max(240, Math.floor(h / 3.2));
+      this.renderer.setPixelRatio(1);
+      this.renderer.setSize(sw, sh, false);
+      this.renderer.domElement.style.width = `${w}px`;
+      this.renderer.domElement.style.height = `${h}px`;
+      this.renderer.domElement.style.imageRendering = 'pixelated';
+      this.realism.setSize(sw, sh);
+    } else {
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.pixelRatioCap));
+      this.renderer.setSize(w, h, true);
+      this.renderer.domElement.style.imageRendering = 'auto';
+      this.realism.setSize(w, h);
+    }
   };
 
   private handleKeyDown = (e: KeyboardEvent): void => {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) {
       return;
     }
-    audioEngine.init();
+    audioEngine.unlock();
     const code = e.code;
+    if (code === 'Escape' || code === 'KeyP' || code === 'KeyH' || code === 'KeyR') {
+      // Toggle/horn/recover must not auto-repeat while held.
+      if (e.repeat) return;
+    }
     this.keys.add(code);
 
     if (code === 'KeyE') {
@@ -314,6 +433,11 @@ export class VelocityEngine {
       this.cycleCamera();
     } else if (code === 'KeyR' && this.sceneMode === 'race') {
       this.recoverCarToTrack();
+    } else if (code === 'KeyH' && this.sceneMode === 'race') {
+      audioEngine.horn();
+    } else if ((code === 'Escape' || code === 'KeyP') && this.sceneMode === 'race' && !this.terminated) {
+      // Pause from the keyboard must match the HUD button exactly.
+      if (!this.photoModeActive) this.setPaused(!this.userPaused);
     }
   };
 
@@ -338,7 +462,37 @@ export class VelocityEngine {
     ];
     const next = order[(order.indexOf(this.cameraView) + 1) % order.length];
     this.cameraView = next;
+    // Snap instead of lerping across the car when switching angles.
+    this.snapCameraNextFrame = true;
     return next;
+  }
+
+  // --- Quality / accessibility settings (Settings modal) -------------------
+
+  public setPixelRatioCap(cap: number): void {
+    this.pixelRatioCap = Math.max(1, Math.min(2, cap));
+    this.handleResize();
+  }
+
+  public setBloomEnabled(enabled: boolean): void {
+    this.realism.setBloomEnabled(enabled);
+  }
+
+  public setCameraShakeEnabled(enabled: boolean): void {
+    this.cameraShakeEnabled = enabled;
+  }
+
+  public setSpeedBlurEnabled(enabled: boolean): void {
+    this.speedBlurEnabled = enabled;
+    if (!enabled) this.realism.setSpeedBlur(0);
+  }
+
+  public setInvertSteering(invert: boolean): void {
+    this.invertSteering = invert;
+  }
+
+  public isPausedNow(): boolean {
+    return this.userPaused;
   }
 
   public getCameraView(): CameraView {
@@ -347,20 +501,7 @@ export class VelocityEngine {
 
   public setPsxRetroMode(enabled: boolean): void {
     this.psxRetroMode = enabled;
-    const w = this.container.clientWidth || window.innerWidth;
-    const h = this.container.clientHeight || window.innerHeight;
-    if (enabled) {
-      // Classic 1999 Re-Volt / PSX crisp low-res render target upscaled with nearest neighbor!
-      this.renderer.setPixelRatio(1);
-      this.renderer.setSize(Math.max(320, Math.floor(w / 3.2)), Math.max(240, Math.floor(h / 3.2)), false);
-      this.renderer.domElement.style.width = `${w}px`;
-      this.renderer.domElement.style.height = `${h}px`;
-      this.renderer.domElement.style.imageRendering = 'pixelated';
-    } else {
-      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-      this.renderer.setSize(w, h, true);
-      this.renderer.domElement.style.imageRendering = 'auto';
-    }
+    this.handleResize();
   }
 
   // --- GARAGE MODE ---
@@ -373,6 +514,10 @@ export class VelocityEngine {
   }): void {
     this.sceneMode = 'garage';
     this.photoModeActive = false;
+    this.userPaused = false;
+    this.terminated = false;
+    this.sessionId++;
+    this.snapCameraNextFrame = true;
     this.currentCar = params.car;
     this.currentTune = params.tune;
     audioEngine.configureCar(params.car, params.tune);
@@ -471,8 +616,13 @@ export class VelocityEngine {
   }): void {
     audioEngine.init();
     this.sceneMode = 'race';
-    this.isPaused = false;
+    this.userPaused = false;
+    this.terminated = false;
     this.photoModeActive = false;
+    this.sessionId++;
+    this.snapCameraNextFrame = true;
+    this.guardrailCooldown = 0;
+    this.smoothedRoll = 0;
     this.raceFinished = false;
 
     this.realism.setSkyOverride(null);
@@ -850,17 +1000,29 @@ export class VelocityEngine {
     shadow.rotation.z = -root.rotation.y;
   }
 
+  /**
+   * Stuck-car recovery (R). Drops the car on the racing line, facing forwards,
+   * at rest — and, crucially, pushes it 0.6 m UP first so it cannot spawn inside
+   * the road mesh, which is what made the car look like it was "trapped in the
+   * floor" and unresponsive after a bad crash.
+   */
   public recoverCarToTrack(): void {
     if (!this.trackWorld) return;
     const nearest = this.trackWorld.sampleNearest(this.playerBody.x, this.playerBody.z);
     const heading = Math.atan2(nearest.tangent.x, nearest.tangent.z);
-    this.playerBody.x = nearest.point.x;
-    this.playerBody.y = nearest.point.y;
-    this.playerBody.z = nearest.point.z;
-    this.playerBody.vx = 0;
-    this.playerBody.vy = 0;
-    this.playerBody.vz = 0;
+    // Keep a small safety margin against the guardrail: recovering onto the
+    // barrier itself would immediately re-trigger the containment.
+    const margin = 0.35;
+    this.playerBody.x = nearest.point.x - Math.cos(heading) * 0;
+    this.playerBody.z = nearest.point.z - Math.sin(heading) * 0;
+    this.playerBody.x += Math.cos(heading) * margin;
+    this.playerBody.z += Math.sin(heading) * margin;
+    this.playerBody.y = nearest.point.y + 0.02;
+    // Zero the internal body-frame velocity too — clearing only vx/vz left
+    // the car moving after an "R" reset.
+    this.playerBody.resetVelocity();
     this.playerBody.headingRad = heading;
+    this.snapCameraNextFrame = true;
   }
 
   private useActivePowerup(): void {
@@ -946,13 +1108,29 @@ export class VelocityEngine {
     audioEngine.speakRadioLine(params.text, params.lang);
   }
 
+  /**
+   * Single entry point for pausing. Audio is handled here so pausing from the
+   * keyboard, the HUD button, the pause menu or a hidden tab all behave the
+   * same: every looping voice (engine, tires, wind, MP3s, soundtrack) stops on
+   * pause and comes back on resume.
+   */
   public setPaused(paused: boolean): void {
-    this.isPaused = paused;
+    if (this.userPaused === paused) return;
+    this.userPaused = paused;
+    if (paused) {
+      audioEngine.pauseForMenu();
+    } else {
+      audioEngine.resumeFromMenu();
+    }
+    this.callbacks.onPauseChanged?.(paused);
+  }
+
+  public isPaused(): boolean {
+    return this.userPaused;
   }
 
   public setPhotoMode(active: boolean, opts?: { fov?: number; rollDeg?: number; hourOfDay?: number; exposure?: number }): void {
     this.photoModeActive = active;
-    this.isPaused = active;
     if (opts?.fov !== undefined) {
       this.photoFov = opts.fov;
       this.camera.fov = opts.fov;
@@ -1034,9 +1212,20 @@ export class VelocityEngine {
       const ch = this.scene.children[i];
       if (!keep.has(ch)) {
         this.scene.remove(ch);
+        // Dispose GPU resources — without this, every garage/race switch
+        // leaked the previous scene's geometries and materials.
+        disposeObject3D(ch);
       }
     }
-    this.smokeParticles = [];
+    // Return live particles to the pool instead of dropping them.
+    for (const pt of this.smokeParticles) {
+      this.scene.remove(pt.mesh);
+      this.smokePool.push(pt.mesh);
+    }
+    for (const r of this.activeProjectiles) {
+      this.scene.remove(r.mesh);
+      disposeObject3D(r.mesh);
+    }
     this.activeProjectiles = [];
     this.precipPoints = null;
     this.ghostMesh = null;
@@ -1057,7 +1246,7 @@ export class VelocityEngine {
       this.animFrameId = requestAnimationFrame(tick);
       const dt = Math.min(0.05, (now - this.lastPerfNow) / 1000);
       this.lastPerfNow = now;
-      if (!this.isPaused) {
+      if (!this.userPaused && !this.photoModeActive && !this.terminated) {
         this.elapsedSec += dt;
       }
 
@@ -1104,6 +1293,8 @@ export class VelocityEngine {
       });
     }
 
+    // Garage: the showroom ambience is a low murmur, no crowd swell.
+    audioEngine.updateAmbience(0, 0.12);
     audioEngine.updateFrame({
       rpm: this.playerBody.rpm,
       maxRpm: 8000,
@@ -1138,7 +1329,7 @@ export class VelocityEngine {
       const pz = this.playerBody.z + Math.cos(this.photoOrbitYaw) * Math.cos(this.photoOrbitPitch) * this.photoDist;
       this.camera.position.set(px, py, pz);
       this.camera.lookAt(this.playerBody.x, this.playerBody.y + 0.65, this.playerBody.z);
-      this.camera.rotation.z = THREE.MathUtils.degToRad(this.photoRollDeg);
+      this.camera.rotateZ(THREE.MathUtils.degToRad(this.photoRollDeg));
       audioEngine.updateFrame({
         rpm: 900,
         maxRpm: 7000,
@@ -1153,7 +1344,11 @@ export class VelocityEngine {
       return;
     }
 
-    if (this.isPaused) {
+    if (this.userPaused || this.terminated) {
+      // Paused: the world is frozen, but the camera must keep looking at the
+      // car so the pause menu sits over a framed shot instead of a stale one
+      // (and so resizing while paused does not leave the car off-frame).
+      this.updateRaceCamera(dt, 0);
       audioEngine.updateFrame({
         rpm: 900,
         maxRpm: 7000,
@@ -1188,7 +1383,8 @@ export class VelocityEngine {
       this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : this.touchControls.brake;
     const steerLeft = this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0;
     const steerRight = this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0;
-    const rawSteer = steerLeft - steerRight || -this.touchControls.steer;
+    const rawSteerBase = steerLeft - steerRight || -this.touchControls.steer;
+    const rawSteer = this.invertSteering ? -rawSteerBase : rawSteerBase;
     const handbrake = this.keys.has('Space') || this.touchControls.handbrake;
     const nitroInput = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') || this.touchControls.nitro;
 
@@ -1197,7 +1393,16 @@ export class VelocityEngine {
       this.dragReactionMs = Math.round(Math.random() * 45 + 95);
     }
 
-    const canMove = this.countdownSec <= 0 && !this.raceFinished;
+    // One source of truth for "may the world move": a paused race, photo mode
+    // and the finish line all freeze the car identically, so no input path can
+    // sneak movement past the state machine.
+    const simAllowed = canSimulate({
+      sceneMode: this.sceneMode,
+      userPaused: this.userPaused,
+      terminated: this.terminated,
+      photoModeActive: this.photoModeActive,
+    });
+    const canMove = simAllowed && this.countdownSec <= 0 && !this.raceFinished;
     if (this.slowdownPenaltyTimer > 0) this.slowdownPenaltyTimer = Math.max(0, this.slowdownPenaltyTimer - dt);
     const penaltyCap = this.slowdownPenaltyTimer > 0 ? 0.35 : 1.0;
 
@@ -1218,7 +1423,7 @@ export class VelocityEngine {
       if (dist < h.radius + 1.1) {
         if (h.kind === 'sheep') {
           // MANDATORY PRODUCER RULE: Immediate Animal Respect Disqualification!
-          this.isPaused = true;
+          this.terminated = true;
           this.callbacks.onSheepDisqualification();
           return;
         } else if (h.kind === 'pothole') {
@@ -1243,7 +1448,9 @@ export class VelocityEngine {
             'water_balloon',
           ];
           this.activePowerup = pool[Math.floor(Math.random() * pool.length)];
+          const sid = this.sessionId;
           window.setTimeout(() => {
+            if (sid !== this.sessionId) return; // scene was rebuilt meanwhile
             h.active = true;
             h.mesh.visible = true;
           }, 8000);
@@ -1264,7 +1471,9 @@ export class VelocityEngine {
             text: `Entrega #${this.deliveriesCompleted} concluída com ${Math.round(this.packageIntegrityPct)}% de integridade! +Bônus!`,
             lang: 'pt-BR',
           });
+          const sid2 = this.sessionId;
           window.setTimeout(() => {
+            if (sid2 !== this.sessionId) return;
             h.active = true;
             h.mesh.visible = true;
           }, 12000);
@@ -1338,7 +1547,11 @@ export class VelocityEngine {
       this.playerBody.y = THREE.MathUtils.lerp(this.playerBody.y, groundY, Math.min(1, dt * 16));
     }
 
-    // Soft Guardrail Elastic Containment so player never falls into infinite void
+    // Soft Guardrail Elastic Containment so player never falls into infinite void.
+    // Impact damage/sound are rate-limited (the old code applied them every
+    // frame while beyond the rail) and the heading is nudged back toward the
+    // track tangent so the car cannot get stuck perpendicular to the rail.
+    if (this.guardrailCooldown > 0) this.guardrailCooldown = Math.max(0, this.guardrailCooldown - dt);
     const maxAllowedOut = halfRoad + 7.5;
     if (Math.abs(nearest.lateralOffset) > maxAllowedOut && this.currentMode !== 'derby') {
       const rightX = nearest.tangent.z;
@@ -1348,9 +1561,18 @@ export class VelocityEngine {
       this.playerBody.z = nearest.point.z - rightZ * sign * (maxAllowedOut - 0.3);
       this.playerBody.vx *= 0.68;
       this.playerBody.vz *= 0.68;
-      this.playerBody.applyImpact(speedKmh * 0.45, sign > 0 ? 'left' : 'right', this.damageEnabled);
-      this.packageIntegrityPct = Math.max(0, this.packageIntegrityPct - 4);
-      audioEngine.triggerCollision(0.45);
+      const tangentHeading = Math.atan2(nearest.tangent.x, nearest.tangent.z);
+      let dh = tangentHeading - this.playerBody.headingRad;
+      while (dh > Math.PI) dh -= Math.PI * 2;
+      while (dh < -Math.PI) dh += Math.PI * 2;
+      this.playerBody.headingRad += dh * 0.35;
+      if (this.guardrailCooldown <= 0) {
+        this.guardrailCooldown = 0.6;
+        this.playerBody.applyImpact(speedKmh * 0.45, sign > 0 ? 'left' : 'right', this.damageEnabled);
+        this.packageIntegrityPct = Math.max(0, this.packageIntegrityPct - 4);
+        audioEngine.triggerCollision(0.45);
+        audioEngine.cheer(0.8); // the crowd loves a wall tap
+      }
     }
 
     // Drop Oil Slick on Track if Player Engine is Leaking Oil!
@@ -1394,11 +1616,26 @@ export class VelocityEngine {
       }
     }
 
-    // Tire Smoke & Rim Sparks Particles!
+    // Tire Smoke & Rim Sparks Particles (surface-aware: dust off-track,
+    // spray in the wet, white smoke on asphalt)!
     if ((maxSlip > 0.28 && speedKmh > 25) || this.playerBody.wheels[0].punctured) {
-      this.spawnTireSmokeOrSpark(this.playerBody.wheels[0].punctured);
+      const traits = effectTraits(
+        onPuddle ? 'asphalt' : isOffTrack ? 'gravel' : 'asphalt',
+        onPuddle ? 1 : this.currentWeather.wetness
+      );
+      this.spawnTireSmokeOrSpark(this.playerBody.wheels[0].punctured, traits.particle);
+    }
+    // Damaged engine: dark smoke from the hood.
+    if (this.playerBody.damage.engineHealth < 55 && Math.random() < dt * 2.2) {
+      this.spawnDamageSmoke();
     }
     this.updateParticlesAndDestructibles(dt, speedKmh);
+
+    // Speed blur feed (radial shutter smear in the grade pass).
+    if (this.speedBlurEnabled) {
+      const blurT = Math.max(0, Math.min(1, (speedKmh - 90) / 220));
+      this.realism.setSpeedBlur(blurT * 0.5);
+    }
 
     // Update Player 3D Mesh
     this.playerRig.root.position.set(this.playerBody.x, this.playerBody.y, this.playerBody.z);
@@ -1448,6 +1685,7 @@ export class VelocityEngine {
       rawThrottle * (0.45 + (this.playerBody.rpm / Math.max(1000, stats.maxRpm)) * 0.55),
       speedKmh,
     );
+    audioEngine.updateAmbience(speedKmh, 0.3 + (this.playerBody.damage.engineHealth < 60 ? 0.15 : 0));
     audioEngine.updateFrame({
       rpm: this.playerBody.rpm,
       maxRpm: stats.maxRpm,
@@ -1768,31 +2006,109 @@ export class VelocityEngine {
     }
   }
 
-  private spawnTireSmokeOrSpark(isSpark: boolean): void {
-    if (this.smokeParticles.length > 55) return;
-    const smokeColor = isSpark
-      ? 0xff9500
-      : this.currentTune.tireCompound === 'drift'
-      ? 0xff007f
-      : 0xd8dee9;
-    const m = new THREE.Mesh(
-      isSpark ? new THREE.BoxGeometry(0.12, 0.12, 0.35) : new THREE.SphereGeometry(0.32, 6, 6),
-      new THREE.MeshBasicMaterial({
-        color: smokeColor,
-        transparent: true,
-        opacity: isSpark ? 0.95 : 0.42,
-      })
-    );
-    const bx = this.playerBody.x - Math.sin(this.playerBody.headingRad) * 1.6 + (Math.random() - 0.5) * 1.2;
-    const bz = this.playerBody.z - Math.cos(this.playerBody.headingRad) * 1.6 + (Math.random() - 0.5) * 1.2;
-    m.position.set(bx, this.playerBody.y + 0.22, bz);
+  private obtainParticleMesh(isSpark: boolean): THREE.Mesh {
+    const pooled = this.smokePool.pop();
+    if (pooled) {
+      pooled.geometry = isSpark ? this.sparkGeo : this.smokeGeo;
+      return pooled;
+    }
+    const mat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false });
+    return new THREE.Mesh(isSpark ? this.sparkGeo : this.smokeGeo, mat);
+  }
+
+  private spawnParticle(opts: {
+    isSpark: boolean;
+    color: number;
+    opacity: number;
+    life: number;
+    x: number;
+    y: number;
+    z: number;
+    vx: number;
+    vy: number;
+    vz: number;
+    scale: number;
+  }): void {
+    if (this.smokeParticles.length > 90) return;
+    const m = this.obtainParticleMesh(opts.isSpark);
+    const mat = m.material as THREE.MeshBasicMaterial;
+    mat.color.setHex(opts.color);
+    mat.opacity = opts.opacity;
+    m.position.set(opts.x, opts.y, opts.z);
+    m.scale.setScalar(opts.scale);
+    m.visible = true;
     this.scene.add(m);
     this.smokeParticles.push({
       mesh: m,
-      life: isSpark ? 0.35 : 0.85,
+      life: opts.life,
+      vx: opts.vx,
+      vy: opts.vy,
+      vz: opts.vz,
+    });
+  }
+
+  private spawnTireSmokeOrSpark(
+    isSpark: boolean,
+    surface: 'smoke' | 'dust' | 'spray' | 'snow' = 'smoke'
+  ): void {
+    const bx = this.playerBody.x - Math.sin(this.playerBody.headingRad) * 1.6 + (Math.random() - 0.5) * 1.2;
+    const bz = this.playerBody.z - Math.cos(this.playerBody.headingRad) * 1.6 + (Math.random() - 0.5) * 1.2;
+    if (isSpark) {
+      this.spawnParticle({
+        isSpark: true,
+        color: 0xff9500,
+        opacity: 0.95,
+        life: 0.35,
+        x: bx,
+        y: this.playerBody.y + 0.22,
+        z: bz,
+        vx: (Math.random() - 0.5) * 2.5,
+        vy: 3.5,
+        vz: (Math.random() - 0.5) * 2.5,
+        scale: 1,
+      });
+      return;
+    }
+    const color =
+      surface === 'dust'
+        ? 0xc2a878
+        : surface === 'spray'
+        ? 0xb9c8d8
+        : surface === 'snow'
+        ? 0xeef4ff
+        : this.currentTune.tireCompound === 'drift'
+        ? 0xff007f
+        : 0xd8dee9;
+    this.spawnParticle({
+      isSpark: false,
+      color,
+      opacity: surface === 'spray' ? 0.3 : surface === 'snow' ? 0.55 : 0.42,
+      life: surface === 'dust' ? 1.1 : surface === 'snow' ? 1.4 : 0.85,
+      x: bx,
+      y: this.playerBody.y + 0.22,
+      z: bz,
       vx: (Math.random() - 0.5) * 2.5,
-      vy: isSpark ? 3.5 : 1.4,
+      vy: surface === 'spray' ? 2.2 : 1.4,
       vz: (Math.random() - 0.5) * 2.5,
+      scale: 1,
+    });
+  }
+
+  private spawnDamageSmoke(): void {
+    const fx = Math.sin(this.playerBody.headingRad);
+    const fz = Math.cos(this.playerBody.headingRad);
+    this.spawnParticle({
+      isSpark: false,
+      color: 0x2b2f36,
+      opacity: 0.5,
+      life: 1.3,
+      x: this.playerBody.x + fx * 1.5 + (Math.random() - 0.5) * 0.5,
+      y: this.playerBody.y + 0.75,
+      z: this.playerBody.z + fz * 1.5 + (Math.random() - 0.5) * 0.5,
+      vx: (Math.random() - 0.5) * 0.8,
+      vy: 1.8,
+      vz: (Math.random() - 0.5) * 0.8,
+      scale: 1.2,
     });
   }
 
@@ -1821,12 +2137,14 @@ export class VelocityEngine {
       posAttr.needsUpdate = true;
     }
 
-    // Smoke & Sparks
+    // Smoke & Sparks (pooled — dead particles return to the pool)
     for (let i = this.smokeParticles.length - 1; i >= 0; i--) {
       const p = this.smokeParticles[i];
       p.life -= dt;
       if (p.life <= 0) {
         this.scene.remove(p.mesh);
+        p.mesh.visible = false;
+        this.smokePool.push(p.mesh);
         this.smokeParticles.splice(i, 1);
       } else {
         p.mesh.position.x += p.vx * dt;
@@ -1895,6 +2213,7 @@ export class VelocityEngine {
   }
 
   private stepGhost(): void {
+    if (this.currentLapRecording.length > 30000) return; // hard cap (time trial)
     if (this.currentMode !== 'time_trial' && this.currentLapRecording.length > 3600) return;
     this.currentLapRecording.push({
       x: this.playerBody.x,
@@ -1952,6 +2271,7 @@ export class VelocityEngine {
           this.finishRace(currentProgress);
         } else {
           this.playerLap++;
+          audioEngine.cheer(1);
         }
       }
     }
@@ -1990,11 +2310,15 @@ export class VelocityEngine {
     const py = this.playerBody.y;
     const pz = this.playerBody.z;
 
-    // Dynamic speed FOV sensation!
-    const targetFov = 56 + Math.min(22, speedKmh * 0.065);
+    // Dynamic speed FOV, compensated for portrait/narrow screens so the car
+    // is never cropped on phones (fitVerticalFov holds horizontal FOV).
+    const baseFov = speedFov(speedKmh);
+    const targetFov = fitVerticalFov(baseFov, this.camera.aspect || 16 / 9);
     this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, dt * 6);
     this.camera.updateProjectionMatrix();
-    this.camera.rotation.z = 0;
+
+    const snap = this.snapCameraNextFrame;
+    this.snapCameraNextFrame = false;
 
     if (this.cameraView === 'cockpit') {
       this.camera.position.set(px - fx * 0.08, py + 1.06, pz - fz * 0.08);
@@ -2009,33 +2333,62 @@ export class VelocityEngine {
       this.camera.position.set(px - fx * 1.6 + fz * 0.9, py + 0.36, pz - fz * 1.6 - fx * 0.9);
       this.camera.lookAt(px + fx * 1.4, py + 0.35, pz + fz * 1.4);
     } else if (this.cameraView === 'helicopter') {
-      this.camera.position.lerp(new THREE.Vector3(px - fx * 24 + 12, py + 19, pz - fz * 24 + 12), Math.min(1, dt * 5));
+      this.camTmp.set(px - fx * 24 + 12, py + 19, pz - fz * 24 + 12);
+      if (snap) this.camera.position.copy(this.camTmp);
+      else this.camera.position.lerp(this.camTmp, Math.min(1, dt * 5));
       this.camera.lookAt(px + fx * 6, py + 0.8, pz + fz * 6);
     } else {
       // Speed-aware chase framing: a fixed 6 m boom under-reads speed at 40
       // km/h and clips the car's own bumper at 280. The boom stretches and
       // lowers slightly with speed, and the look-ahead grows so fast corners
       // stay in frame — the same thing a chase camera does in any driving game.
-      const speedT = THREE.MathUtils.clamp(speedKmh / 260, 0, 1);
       const far = this.cameraView === 'chase_far';
-      const dist = (far ? 8.6 : 6.1) + speedT * (far ? 2.4 : 1.9);
-      const height = (far ? 3.2 : 2.25) + speedT * 0.35;
-      const desired = new THREE.Vector3(px - fx * dist, py + height, pz - fz * dist);
-      this.camera.position.lerp(desired, Math.min(1, dt * 11));
-      const lookAhead = 6.5 + speedT * 7.5;
-      this.camera.lookAt(px + fx * lookAhead, py + 0.95, pz + fz * lookAhead);
-      // A hair of roll into the corner (0.6°) sells the lateral load without
-      // making the horizon feel like a boat.
-      this.camera.rotation.z = THREE.MathUtils.clamp(-this.playerBody.rollRad * 0.16, -0.045, 0.045);
+      const boom = chaseBoom(speedKmh, far);
+      this.camTmp.set(px - fx * boom.dist, py + boom.height, pz - fz * boom.dist);
+      if (snap) this.camera.position.copy(this.camTmp);
+      else this.camera.position.lerp(this.camTmp, Math.min(1, dt * 11));
+      this.camera.lookAt(px + fx * boom.lookAhead, py + 0.95, pz + fz * boom.lookAhead);
+      // Horizon guarantee: roll is applied with rotateZ() (rotation around
+      // the view axis — a pure roll) and hard-clamped to ±0.8°, smoothed so
+      // it can never snap or accumulate. Writing rotation.z after lookAt()
+      // with XYZ Euler order tilted the horizon by a pitch-dependent amount:
+      // that was the "tela torta" bug.
+      const targetRoll = computeChaseRoll(this.playerBody.rollRad, true);
+      this.smoothedRoll += (targetRoll - this.smoothedRoll) * Math.min(1, dt * 8);
+      this.camera.rotateZ(this.smoothedRoll);
+      // Subtle speed shake (toggleable in Settings).
+      if (this.cameraShakeEnabled && speedKmh > 140) {
+        const shakeT = Math.min(1, (speedKmh - 140) / 160);
+        const t = this.elapsedSec;
+        this.camera.position.y += Math.sin(t * 31.7) * 0.012 * shakeT;
+        this.camera.position.x += Math.sin(t * 27.3 + 1.7) * 0.01 * shakeT;
+      }
     }
   }
 
   public dispose(): void {
     if (this.animFrameId !== null) cancelAnimationFrame(this.animFrameId);
     window.removeEventListener('resize', this.handleResize);
+    window.removeEventListener('orientationchange', this.handleResize);
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('keyup', this.handleKeyUp);
+    window.removeEventListener('blur', this.handleBlur);
+    document.removeEventListener('visibilitychange', this.handleVisibility);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    // Free the whole scene graph, the particle pool and the post pipeline.
+    this.clearDynamicScene();
+    for (const m of this.smokePool) {
+      (m.material as THREE.Material).dispose();
+    }
+    this.smokePool = [];
+    this.smokeGeo.dispose();
+    this.sparkGeo.dispose();
+    this.realism.dispose();
     this.renderer.dispose();
+    if (this.renderer.domElement.parentElement === this.container) {
+      this.container.removeChild(this.renderer.domElement);
+    }
   }
 }
 

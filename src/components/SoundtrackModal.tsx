@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Disc3, Music2 } from 'lucide-react';
 import { SOUNDTRACK, SoundtrackTrack, trackById } from '../audio/Soundtrack';
 import { audioEngine } from '../audio/VelocityAudioEngine';
+import { CustomMusicPanel } from './CustomMusicPanel';
 
 interface Props {
   onClose: () => void;
@@ -15,6 +17,7 @@ interface Props {
  * licensed to infringe.
  */
 export const SoundtrackModal: React.FC<Props> = ({ onClose }) => {
+  const [tab, setTab] = useState<'game' | 'mine'>('game');
   const [playingId, setPlayingId] = useState<string | null>(() => {
     const current = audioEngine.getNowPlaying();
     return current ? current.id : null;
@@ -69,13 +72,13 @@ export const SoundtrackModal: React.FC<Props> = ({ onClose }) => {
     <Overlay onClose={onClose}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
         <div>
-          <div style={{ fontSize: 10, color: '#38bdf8', fontWeight: 900, letterSpacing: 1.6 }}>
-            TRILHA SONORA ORIGINAL • VELOCITY STUDIO
+          <div className="vu-eyebrow" style={{ color: '#38bdf8' }}>
+            Trilha Sonora • Velocity Studio
           </div>
-          <h2 style={{ margin: '4px 0 2px', fontSize: 22 }}>📻 Som da Viagem</h2>
-          <div style={{ fontSize: 12, color: '#94a3b8' }}>
+          <h2 className="vu-title">Som da Viagem</h2>
+          <div className="vu-muted">
             {SOUNDTRACK.length} faixas compostas dentro do jogo — sintetizadas em tempo real, sem
-            download e sem direitos autorais de terceiros. Escolha, aperte o play e rode.
+            download e sem direitos autorais de terceiros. Ou importe seus próprios MP3 na aba ao lado.
           </div>
         </div>
         <button onClick={onClose} style={closeBtn}>
@@ -83,6 +86,28 @@ export const SoundtrackModal: React.FC<Props> = ({ onClose }) => {
         </button>
       </div>
 
+      {/* Tabs: game soundtrack vs imported MP3s */}
+      <div style={{ display: 'flex', gap: 8, margin: '14px 0 4px' }}>
+        <button
+          className="vu-btn"
+          onClick={() => setTab('game')}
+          style={{ background: tab === 'game' ? 'rgba(56,189,248,0.22)' : undefined, borderColor: tab === 'game' ? '#38bdf8' : undefined }}
+        >
+          <Disc3 size={14} /> Trilha do Jogo
+        </button>
+        <button
+          className="vu-btn"
+          onClick={() => setTab('mine')}
+          style={{ background: tab === 'mine' ? 'rgba(255,149,0,0.22)' : undefined, borderColor: tab === 'mine' ? '#ff9500' : undefined }}
+        >
+          <Music2 size={14} /> Minhas Músicas (MP3)
+        </button>
+      </div>
+
+      {tab === 'mine' ? (
+        <CustomMusicPanel />
+      ) : (
+        <>
       {/* Transport bar */}
       <div
         style={{
@@ -277,40 +302,15 @@ export const SoundtrackModal: React.FC<Props> = ({ onClose }) => {
         Dica: o mix abaixa sozinho quando você pisa fundo (side-chain no motor) e o andamento estica
         levemente com a velocidade — a trilha acompanha a pilotagem em vez de só tocar por cima.
       </div>
+        </>
+      )}
     </Overlay>
   );
 };
 
 const Overlay: React.FC<{ children: React.ReactNode; onClose: () => void }> = ({ children, onClose }) => (
-  <div
-    style={{
-      position: 'fixed',
-      inset: 0,
-      zIndex: 60,
-      background: 'rgba(3, 6, 14, 0.78)',
-      backdropFilter: 'blur(8px)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: 16,
-    }}
-    onClick={onClose}
-  >
-    <div
-      onClick={(e) => e.stopPropagation()}
-      style={{
-        width: 'min(760px, 96vw)',
-        maxHeight: '92vh',
-        overflowY: 'auto',
-        background: 'linear-gradient(160deg, #0b1120, #070b14)',
-        border: '1px solid rgba(255,255,255,0.14)',
-        borderRadius: 16,
-        padding: 18,
-        color: '#e2e8f0',
-        fontFamily: 'inherit',
-        boxShadow: '0 30px 80px rgba(0,0,0,0.6)',
-      }}
-    >
+  <div className="vu-overlay" onClick={onClose}>
+    <div className="vu-modal" onClick={(e) => e.stopPropagation()}>
       {children}
     </div>
   </div>

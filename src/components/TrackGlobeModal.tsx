@@ -1,21 +1,40 @@
 import React, { useMemo, useState } from 'react';
+import {
+  Bomb,
+  type LucideProps,
+  CarFront,
+  Flag,
+  Globe2,
+  Package,
+  Rocket,
+  ShieldAlert,
+  Timer,
+  Trophy,
+  Wind,
+  Zap,
+} from 'lucide-react';
 import { GameMode, TrackCategory, TrackSpec, WeatherPreset } from '../types/game';
 import { TRACK_CATALOG, TRACK_CATEGORY_LABELS } from '../data/trackCatalog';
 import { WEATHER_PRESETS } from '../data/weatherCatalog';
 import { AssistMode } from '../engine/PacejkaPhysics';
 
-export const GAME_MODE_LABELS: { id: GameMode; title: string; badge: string; desc: string }[] = [
-  { id: 'quick_race', title: 'Corrida Rápida Completa', badge: '🏁', desc: 'Todos os parâmetros ajustáveis, grid completo e clima dinâmico.' },
-  { id: 'revolt_legacy', title: 'Modo Re-Volt Legacy 1999', badge: '⚡', desc: 'Escala RC Macro + Power-ups (Foguetes, Óleo, Estrela, Choque) + opção PSX!' },
-  { id: 'drift', title: 'Campeonato D1 Drift', badge: '💨', desc: 'Pontuação por ângulo, velocidade, combos e juízes no rádio!' },
-  { id: 'drag', title: 'Arrancada Drag Strip', badge: '🚦', desc: 'Reação no pinheirinho em ms, troca na luz verde e 1/4 de milha!' },
-  { id: 'time_trial', title: 'Contra-Relógio + Ghost 3D', badge: '⏱️', desc: 'Grave sua volta ideal e dispute décimo a décimo contra seu Ghost 3D!' },
-  { id: 'police_chase', title: 'Perseguição Policial 5★', badge: '🚓', desc: 'Viaturas V8 com sirene tentando fechar seu caminho em alta velocidade!' },
-  { id: 'derby', title: 'Arena Destruição Derby', badge: '💥', desc: 'Deformação FEA total — destrua os rivais até sobrar um inteiro!' },
-  { id: 'delivery', title: 'Entrega Expressa (Crazy Courier)', badge: '📦', desc: 'Entregue pacotes frágeis nas zonas verdes sem amassar a carga!' },
-  { id: 'stunt', title: 'Parque de Acrobacias & Saltos', badge: '🚀', desc: 'Rampas gigantes, airtime e gravidade planetária!' },
-  { id: 'multiplayer', title: 'Lobby Online ELO + Anti-Troll IA', badge: '🌐', desc: 'Matchmaking competitivo com Steward Anti-Troll analisando seu volante!' },
-  { id: 'championship', title: 'Campeonato Personalizado FIA', badge: '🏆', desc: 'Calendário de etapas, regras técnicas de potência/peso e pontuação.' },
+export const GAME_MODE_LABELS: {
+  id: GameMode;
+  title: string;
+  Icon: React.ComponentType<LucideProps>;
+  desc: string;
+}[] = [
+  { id: 'quick_race', title: 'Corrida Rápida Completa', Icon: Flag, desc: 'Todos os parâmetros ajustáveis, grid completo e clima dinâmico.' },
+  { id: 'revolt_legacy', title: 'Modo Re-Volt Legacy 1999', Icon: Zap, desc: 'Escala RC Macro + Power-ups (Foguetes, Óleo, Estrela, Choque) + opção PSX!' },
+  { id: 'drift', title: 'Campeonato D1 Drift', Icon: Wind, desc: 'Pontuação por ângulo, velocidade, combos e juízes no rádio!' },
+  { id: 'drag', title: 'Arrancada Drag Strip', Icon: CarFront, desc: 'Reação no pinheirinho em ms, troca na luz verde e 1/4 de milha!' },
+  { id: 'time_trial', title: 'Contra-Relógio + Ghost 3D', Icon: Timer, desc: 'Grave sua volta ideal e dispute décimo a décimo contra seu Ghost 3D!' },
+  { id: 'police_chase', title: 'Perseguição Policial 5★', Icon: ShieldAlert, desc: 'Viaturas V8 com sirene tentando fechar seu caminho em alta velocidade!' },
+  { id: 'derby', title: 'Arena Destruição Derby', Icon: Bomb, desc: 'Deformação FEA total — destrua os rivais até sobrar um inteiro!' },
+  { id: 'delivery', title: 'Entrega Expressa (Crazy Courier)', Icon: Package, desc: 'Entregue pacotes frágeis nas zonas verdes sem amassar a carga!' },
+  { id: 'stunt', title: 'Parque de Acrobacias & Saltos', Icon: Rocket, desc: 'Rampas gigantes, airtime e gravidade planetária!' },
+  { id: 'multiplayer', title: 'Lobby Online ELO + Anti-Troll IA', Icon: Globe2, desc: 'Matchmaking competitivo com Steward Anti-Troll analisando seu volante!' },
+  { id: 'championship', title: 'Campeonato Personalizado FIA', Icon: Trophy, desc: 'Calendário de etapas, regras técnicas de potência/peso e pontuação.' },
 ];
 
 interface Props {
@@ -104,8 +123,8 @@ export const TrackGlobeModal: React.FC<Props> = (props) => {
                 cursor: 'pointer',
               }}
             >
-              <div style={{ fontWeight: 800, fontSize: 12 }}>
-                {m.badge} {m.title}
+              <div style={{ fontWeight: 800, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <m.Icon size={14} /> {m.title}
               </div>
               <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 2 }}>{m.desc}</div>
             </button>
