@@ -108,7 +108,7 @@ const EXTRA_CHAPTER_TITLES: [string, string, string, string, CareerChapter['reco
   ['Anel Orbital Lagrange (0.35g)', 'Velocidade Sem Peso Acima da Terra', 'Sigrún Jónsdóttir', 'orbital-space-station', 'hyper_concepts', 'quick_race', 250000],
   ['Orgulho do Vale do Aço', 'Estreia Mundial do Solis-Tupã Ybytu X1', 'Seu Jorge & Dra. Helena', 'pro-fictional-1', 'hyper_concepts', 'quick_race', 290000],
   ['Noite de Gala em Monte Carlo', 'Showroom de Luxo em Mônaco Desbloqueado', 'Viktor Vance (Rival Final)', 'monaco-monte-carlo', 'formula_proto', 'quick_race', 350000],
-  ['A Grande Final Mundial Velocity Unchained', 'Coliseu Final — A Coroa da História', 'Conselho Mundial FIA-Velocity', 'pro-fictional-25', 'hyper_concepts', 'quick_race', 500000],
+  ['A Grande Final Mundial R-volt', 'Coliseu Final — A Coroa da História', 'Conselho Mundial FIA-Velocity', 'pro-fictional-25', 'hyper_concepts', 'quick_race', 500000],
 ];
 
 export const CAREER_CHAPTERS: CareerChapter[] = [

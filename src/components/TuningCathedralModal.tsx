@@ -37,7 +37,7 @@ export const TuningCathedralModal: React.FC<Props> = ({
   };
 
   return (
-    <div style={panelStyle}>
+    <div className="tuning-panel" style={panelStyle}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
         <div>
           <div style={{ fontSize: 11, color: '#ff9500', fontWeight: 700, letterSpacing: 1.4 }}>
@@ -46,7 +46,7 @@ export const TuningCathedralModal: React.FC<Props> = ({
           <h2 style={{ fontSize: 19, margin: 0 }}>{car.name}</h2>
         </div>
         <button onClick={onClose} style={closeBtnStyle}>
-          FECHAR [ESC]
+          FECHAR
         </button>
       </div>
 
@@ -54,7 +54,7 @@ export const TuningCathedralModal: React.FC<Props> = ({
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(90px, 1fr))',
           gap: 8,
           padding: 10,
           borderRadius: 8,

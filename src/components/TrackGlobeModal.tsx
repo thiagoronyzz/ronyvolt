@@ -33,8 +33,8 @@ export const GAME_MODE_LABELS: {
   { id: 'derby', title: 'Arena Destruição Derby', Icon: Bomb, desc: 'Deformação FEA total — destrua os rivais até sobrar um inteiro!' },
   { id: 'delivery', title: 'Entrega Expressa (Crazy Courier)', Icon: Package, desc: 'Entregue pacotes frágeis nas zonas verdes sem amassar a carga!' },
   { id: 'stunt', title: 'Parque de Acrobacias & Saltos', Icon: Rocket, desc: 'Rampas gigantes, airtime e gravidade planetária!' },
-  { id: 'multiplayer', title: 'Lobby Online ELO + Anti-Troll IA', Icon: Globe2, desc: 'Matchmaking competitivo com Steward Anti-Troll analisando seu volante!' },
-  { id: 'championship', title: 'Campeonato Personalizado FIA', Icon: Trophy, desc: 'Calendário de etapas, regras técnicas de potência/peso e pontuação.' },
+  { id: 'multiplayer', title: 'Protótipo multiplayer local', Icon: Globe2, desc: 'Corrida local contra IA; lobby online e matchmaking ainda não estão disponíveis.' },
+  { id: 'championship', title: 'Campeonato (protótipo)', Icon: Trophy, desc: 'Corrida individual; calendário e classificação de campeonato ainda não estão implementados.' },
 ];
 
 interface Props {
@@ -86,8 +86,8 @@ export const TrackGlobeModal: React.FC<Props> = (props) => {
   }, [cat, query]);
 
   return (
-    <div style={wrapStyle}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+    <div className="track-browser mobile-game-panel" style={wrapStyle}>
+      <div className="mobile-panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
         <div>
           <div style={{ fontSize: 11, color: '#00f5d4', fontWeight: 800, letterSpacing: 1.5 }}>
             SEÇÕES 3 & 5 — {TRACK_CATALOG.length} CENÁRIOS MUNDIAIS • {WEATHER_PRESETS.length} CLIMAS DINÂMICOS • 14 MODOS
@@ -105,7 +105,7 @@ export const TrackGlobeModal: React.FC<Props> = (props) => {
       </div>
 
       {/* Mode Selector Strip */}
-      <div style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 8, marginBottom: 10 }}>
+      <div className="track-mode-strip" style={{ display: 'flex', gap: 6, overflowX: 'auto', paddingBottom: 8, marginBottom: 10 }}>
         {GAME_MODE_LABELS.map((m) => {
           const active = props.selectedMode === m.id;
           return (
@@ -132,7 +132,7 @@ export const TrackGlobeModal: React.FC<Props> = (props) => {
         })}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1.65fr 1fr', gap: 14, flex: 1, minHeight: 0 }}>
+      <div className="track-browser-main" style={{ display: 'grid', gridTemplateColumns: '1.65fr 1fr', gap: 14, flex: 1, minHeight: 0 }}>
         {/* Left: 205 Track Browser */}
         <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 8 }}>
@@ -162,6 +162,7 @@ export const TrackGlobeModal: React.FC<Props> = (props) => {
           />
 
           <div
+            className="track-browser-list"
             style={{
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fill, minmax(235px, 1fr))',

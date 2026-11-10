@@ -16,7 +16,7 @@ import {
 import { AssistMode, computeEffectiveCarStats } from './PacejkaPhysics';
 import { VehicleDynamicsBody } from './VehicleDynamics';
 import { buildCarMesh, BuiltCarRig } from '../cars/CarMeshBuilder';
-import { buildTrackWorld, BuiltTrackWorld } from '../tracks/TrackBuilder';
+import { buildTrackWorld, BuiltTrackWorld, resolveTrackForWorld } from '../tracks/TrackBuilder';
 import { buildGarageShowroomV2 } from '../tracks/GarageStudio';
 import { CAR_CATALOG, createDefaultTuneForCar } from '../data/carCatalog';
 import { BOT_ROSTER } from '../data/botRoster';
@@ -24,6 +24,7 @@ import { WEATHER_PRESETS } from '../data/weatherCatalog';
 import { audioEngine } from '../audio/VelocityAudioEngine';
 import { RealismRenderer } from '../render/RealismRenderer';
 import { buildRacingLine, RacingLine, RacingLineFollower } from '../ai/RacingLine';
+import { adjustBotSkill } from '../ai/difficulty';
 import { chaseBoom, computeChaseRoll, fitVerticalFov, speedFov } from './CameraRig';
 import { canSimulate, effectTraits, shouldPauseOnHide } from './GameStateRules';
 import { disposeObject3D } from './disposal';
@@ -320,51 +321,51 @@ export class VelocityEngine {
     document.addEventListener('visibilitychange', this.handleVisibility);
 
     const dom = this.renderer.domElement;
-    dom.addEventListener('pointerdown', (e) => {
-      audioEngine.init();
-      this.isDraggingOrbit = true;
-      this.lastPointerX = e.clientX;
-      this.lastPointerY = e.clientY;
-    });
-    window.addEventListener('pointerup', () => {
-      this.isDraggingOrbit = false;
-    });
-    window.addEventListener('pointermove', (e) => {
-      if (!this.isDraggingOrbit) return;
-      const dx = e.clientX - this.lastPointerX;
-      const dy = e.clientY - this.lastPointerY;
-      this.lastPointerX = e.clientX;
-      this.lastPointerY = e.clientY;
-
-      if (this.sceneMode === 'garage') {
-        this.garageOrbitYaw -= dx * 0.007;
-        this.garageOrbitPitch = THREE.MathUtils.clamp(this.garageOrbitPitch + dy * 0.005, 0.02, 0.42);
-      } else if (this.photoModeActive) {
-        this.photoOrbitYaw -= dx * 0.007;
-        this.photoOrbitPitch = THREE.MathUtils.clamp(this.photoOrbitPitch + dy * 0.005, -0.1, 1.35);
-      }
-    });
-    dom.addEventListener(
-      'wheel',
-      (e) => {
-        if (this.sceneMode === 'garage') {
-          this.garageZoomDist = THREE.MathUtils.clamp(
-            this.garageZoomDist + e.deltaY * 0.006,
-            this.garageFraming.minDist,
-            this.garageFraming.maxDist
-          );
-        } else if (this.photoModeActive) {
-          this.photoDist = THREE.MathUtils.clamp(this.photoDist + e.deltaY * 0.006, 2.0, 35.0);
-        }
-      },
-      { passive: true }
-    );
+    dom.addEventListener('pointerdown', this.handlePointerDown);
+    window.addEventListener('pointerup', this.handlePointerUp);
+    window.addEventListener('pointermove', this.handlePointerMove);
+    dom.addEventListener('wheel', this.handleWheel, { passive: true });
   }
+
+  private handlePointerDown = (e: PointerEvent): void => {
+    audioEngine.init();
+    this.isDraggingOrbit = true;
+    this.lastPointerX = e.clientX;
+    this.lastPointerY = e.clientY;
+  };
+
+  private handlePointerUp = (): void => { this.isDraggingOrbit = false; };
+
+  private handlePointerMove = (e: PointerEvent): void => {
+    if (!this.isDraggingOrbit) return;
+    const dx = e.clientX - this.lastPointerX;
+    const dy = e.clientY - this.lastPointerY;
+    this.lastPointerX = e.clientX;
+    this.lastPointerY = e.clientY;
+    if (this.sceneMode === 'garage') {
+      this.garageOrbitYaw -= dx * 0.007;
+      this.garageOrbitPitch = THREE.MathUtils.clamp(this.garageOrbitPitch + dy * 0.005, 0.02, 0.42);
+    } else if (this.photoModeActive) {
+      this.photoOrbitYaw -= dx * 0.007;
+      this.photoOrbitPitch = THREE.MathUtils.clamp(this.photoOrbitPitch + dy * 0.005, -0.1, 1.35);
+    }
+  };
+
+  private handleWheel = (e: WheelEvent): void => {
+    if (this.sceneMode === 'garage') {
+      this.garageZoomDist = THREE.MathUtils.clamp(
+        this.garageZoomDist + e.deltaY * 0.006, this.garageFraming.minDist, this.garageFraming.maxDist
+      );
+    } else if (this.photoModeActive) {
+      this.photoDist = THREE.MathUtils.clamp(this.photoDist + e.deltaY * 0.006, 2.0, 35.0);
+    }
+  };
 
   private handleBlur = (): void => {
     // Keys held when the window loses focus would otherwise stay "pressed"
     // forever (car accelerating into a wall after alt-tab).
     this.keys.clear();
+    this.isDraggingOrbit = false;
     this.touchControls.throttle = 0;
     this.touchControls.brake = 0;
     this.touchControls.steer = 0;
@@ -415,7 +416,7 @@ export class VelocityEngine {
     }
     audioEngine.unlock();
     const code = e.code;
-    if (code === 'Escape' || code === 'KeyP' || code === 'KeyH' || code === 'KeyR') {
+    if (code === 'Escape' || code === 'KeyP' || code === 'KeyH' || code === 'KeyR' || code === 'KeyC') {
       // Toggle/horn/recover must not auto-repeat while held.
       if (e.repeat) return;
     }
@@ -512,6 +513,7 @@ export class VelocityEngine {
     trophyCount: number;
     posters: SavedPoster[];
   }): void {
+    this.setPaused(false);
     this.sceneMode = 'garage';
     this.photoModeActive = false;
     this.userPaused = false;
@@ -614,7 +616,9 @@ export class VelocityEngine {
     layoutVariant?: 'GP' | 'National' | 'Sprint';
     customTrack?: CustomTrackData | null;
   }): void {
+    const track = resolveTrackForWorld(config.track, config.customTrack);
     audioEngine.init();
+    this.setPaused(false);
     this.sceneMode = 'race';
     this.userPaused = false;
     this.terminated = false;
@@ -624,13 +628,17 @@ export class VelocityEngine {
     this.guardrailCooldown = 0;
     this.smoothedRoll = 0;
     this.raceFinished = false;
+    this.keys.clear();
+    this.shiftUpQueued = false;
+    this.shiftDownQueued = false;
+    this.touchControls = { throttle: 0, brake: 0, steer: 0, nitro: false, handbrake: false };
 
     this.realism.setSkyOverride(null);
     this.realism.setFogOverride(null);
-    this.sunLatitudeDeg = latitudeForCountry(config.track.country);
+    this.sunLatitudeDeg = latitudeForCountry(track.country);
     this.currentCar = config.car;
     this.currentTune = config.tune;
-    this.currentTrack = config.track;
+    this.currentTrack = track;
     this.currentWeather = config.weather;
     this.currentMode = config.mode;
     this.totalLaps = Math.max(1, config.laps);
@@ -650,7 +658,7 @@ export class VelocityEngine {
 
     // Build 3D Circuit & World
     this.trackWorld = buildTrackWorld(
-      config.track,
+      track,
       config.mode,
       config.layoutVariant ?? 'GP',
       config.customTrack
@@ -679,7 +687,7 @@ export class VelocityEngine {
           clA: Math.max(0.4, stats.clDownforce) * 2.05,
           powerW: stats.effectiveHp * 745.7,
           brakeMuScale: 1.15,
-          gravityG: config.track.gravityG,
+          gravityG: track.gravityG,
         });
       } catch {
         this.racingLine = null; // fall back to the legacy spline follower
@@ -705,7 +713,8 @@ export class VelocityEngine {
     const candidateCars = CAR_CATALOG.filter((c) => c.category === config.car.category);
 
     for (let i = 0; i < actualBots; i++) {
-      const profile = BOT_ROSTER[(i * 7 + config.track.seed) % BOT_ROSTER.length];
+      const baseProfile = BOT_ROSTER[(i * 7 + track.seed) % BOT_ROSTER.length];
+      const profile = { ...baseProfile, skill: adjustBotSkill(baseProfile.skill, config.botDifficulty) };
       const isPolice = config.mode === 'police_chase';
       const botSpec = isPolice
         ? CAR_CATALOG.find((c) => c.category === 'supercars') ?? config.car
@@ -765,7 +774,7 @@ export class VelocityEngine {
               consistency: profile.consistency,
               aggression: profile.aggression,
               tireManagement: profile.tireManagement,
-              seed: i * 137 + config.track.seed,
+              seed: i * 137 + track.seed,
             })
           : undefined,
       });
@@ -784,7 +793,7 @@ export class VelocityEngine {
 
     // Reverb character per venue: a tunnel and an open circuit must not share
     // the same impulse response.
-    const biome = config.track.biome;
+    const biome = track.biome;
     const env =
       biome.includes('tunnel') || biome.includes('orbital') || biome.includes('submarine')
         ? 'tunnel'
@@ -819,9 +828,9 @@ export class VelocityEngine {
     this.emitRadio({
       senderName: 'Direção de Prova FIA-Velocity',
       callsign: 'RACE-CTRL',
-      nationality: config.track.country,
+      nationality: track.country,
       relation: 'race_control',
-      text: `Grid alinhado em ${config.track.name}! Clima: ${config.weather.name}. Prepare-se para a largada!`,
+      text: `Grid alinhado em ${track.name}! Clima: ${config.weather.name}. Prepare-se para a largada!`,
       lang: 'pt-BR',
     });
   }
@@ -1118,6 +1127,7 @@ export class VelocityEngine {
     if (this.userPaused === paused) return;
     this.userPaused = paused;
     if (paused) {
+      this.touchControls = { throttle: 0, brake: 0, steer: 0, nitro: false, handbrake: false };
       audioEngine.pauseForMenu();
     } else {
       audioEngine.resumeFromMenu();
@@ -1131,6 +1141,7 @@ export class VelocityEngine {
 
   public setPhotoMode(active: boolean, opts?: { fov?: number; rollDeg?: number; hourOfDay?: number; exposure?: number }): void {
     this.photoModeActive = active;
+    if (active) this.touchControls = { throttle: 0, brake: 0, steer: 0, nitro: false, handbrake: false };
     if (opts?.fov !== undefined) {
       this.photoFov = opts.fov;
       this.camera.fov = opts.fov;
@@ -2373,6 +2384,10 @@ export class VelocityEngine {
     window.removeEventListener('keydown', this.handleKeyDown);
     window.removeEventListener('keyup', this.handleKeyUp);
     window.removeEventListener('blur', this.handleBlur);
+    window.removeEventListener('pointerup', this.handlePointerUp);
+    window.removeEventListener('pointermove', this.handlePointerMove);
+    this.renderer.domElement.removeEventListener('pointerdown', this.handlePointerDown);
+    this.renderer.domElement.removeEventListener('wheel', this.handleWheel);
     document.removeEventListener('visibilitychange', this.handleVisibility);
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;

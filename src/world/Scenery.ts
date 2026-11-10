@@ -27,6 +27,15 @@
  */
 
 import * as THREE from 'three';
+
+/** Add a small foliage glow to the standard material fragment shader. */
+export function applyLeafGlow(shader: Parameters<THREE.Material['onBeforeCompile']>[0]): void {
+  shader.uniforms.uLeafGlow = { value: 0.45 };
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\nuniform float uLeafGlow;')
+    .replace('#include <dithering_fragment>', `#include <dithering_fragment>
+       gl_FragColor.rgb += vec3(0.06, 0.09, 0.03) * uLeafGlow;`);
+}
 import { BiomeTheme } from '../types/game';
 import { fbm2, hash2, seededRandom, valueNoise2 } from './noise';
 import { barkMaps, concreteMaps, foliageCardTexture, grassCardTexture, groundDetailMaps } from './proceduralTextures';
@@ -299,17 +308,7 @@ export function buildTree(
     metalness: 0,
     vertexColors: true,
   });
-  leafMat.onBeforeCompile = (shader) => {
-    // Foliage needs translucency to read: leaves lit from behind glow. Adding a
-    // wrapped-lambert term (V-ish backscatter) is cheap and it is the single
-    // biggest "foliage is alive" cue.
-    shader.uniforms.uLeafGlow = { value: 0.45 };
-    shader.fragmentShader = shader.fragmentShader.replace(
-      '#include <dithering_fragment>',
-      `#include <dithering_fragment>
-       gl_FragColor.rgb += vec3(0.06, 0.09, 0.03) * uLeafGlow;`
-    );
-  };
+  leafMat.onBeforeCompile = applyLeafGlow;
 
   const canopyBaseY = species.trunkH * (species.form > 0.6 ? 0.55 : 0.78);
   const clumpMeshes: THREE.Mesh[] = [];
