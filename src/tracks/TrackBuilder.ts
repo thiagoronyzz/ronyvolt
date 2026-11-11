@@ -56,6 +56,8 @@ export interface BuiltTrackWorld {
   totalLengthM: number;
   roadWidth: number;
   isClosedLoop: boolean;
+  /** The five start-lamp meshes hanging from the gantry beam (light order 0..4). */
+  startLamps: THREE.Mesh[];
   roadMaterial?: THREE.MeshPhysicalMaterial;
   destructibles: DestructibleProp[];
   hazards: HazardEntity[];
@@ -608,6 +610,38 @@ export function buildTrackWorld(
   );
   crossBeam.position.set(0, 7.1, 0);
   gantry.add(pLeft, pRight, crossBeam);
+
+  // ── FIA START LIGHTS (five red lamp pairs, hung from the start gantry) ──
+  // Driven per-frame by VelocityEngine from the StartSequence state machine:
+  // lamps 0,2,4,6,8 (left lamp of each pair) and 1,3,5,7,9 (right lamp).
+  const startLamps: THREE.Mesh[] = [];
+  {
+    const lampGeo = new THREE.SphereGeometry(0.16, 14, 10);
+    const lampHousingGeo = new THREE.BoxGeometry(0.52, 0.34, 0.18);
+    const housingMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.55, metalness: 0.35 });
+    const spread = Math.min(roadWidth * 0.52, 5.2);
+    for (let i = 0; i < 5; i++) {
+      const x = -spread / 2 + (i * spread) / 4;
+      const housing = new THREE.Mesh(lampHousingGeo, housingMat);
+      housing.position.set(x, 6.28, 0);
+      gantry.add(housing);
+      for (const side of [-0.11, 0.11]) {
+        // Each lamp starts dark; the engine lights them red for the hold,
+        // then extinguishes ALL of them at once (FIA "lights out").
+        const lampMat = new THREE.MeshStandardMaterial({
+          color: 0x1a0505,
+          emissive: 0xff1a1a,
+          emissiveIntensity: 0.04,
+          roughness: 0.35,
+        });
+        const lamp = new THREE.Mesh(lampGeo, lampMat);
+        lamp.position.set(x + side, 6.28, 0.115);
+        lamp.userData.startLamp = startLamps.length;
+        gantry.add(lamp);
+        startLamps.push(lamp);
+      }
+    }
+  }
   group.add(gantry);
 
   // 5. Populate Scenery, Spectators, Churrasco Smoke, Sheep, THE CAT, Destructibles & Power-Ups!
@@ -1105,6 +1139,7 @@ export function buildTrackWorld(
     totalLengthM,
     roadWidth,
     isClosedLoop,
+    startLamps,
     roadMaterial: roadMat,
     destructibles,
     hazards,
