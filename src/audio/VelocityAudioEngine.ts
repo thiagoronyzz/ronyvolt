@@ -852,6 +852,41 @@ export class VelocityAudioEngine {
     osc.stop(now + 0.26);
   }
 
+  /** FIA-style start: a short beep each time a lamp pair lights, plus a low
+   *  rumble when ALL lamps extinguish (lights out). */
+  public triggerStartLamp(pairIndex: number): void {
+    if (!this.ctx || !this.masterGain || this.isMuted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = 480 + pairIndex * 40;
+    g.gain.setValueAtTime(0.055, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.09);
+    osc.connect(g).connect(this.sfxBus ?? this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.095);
+  }
+
+  public triggerLightsOut(): void {
+    if (!this.ctx || !this.masterGain || this.isMuted) return;
+    const now = this.ctx.currentTime;
+    // Deep twin-thud: the whole grid launches at once.
+    for (const [freq, peak, dur] of [[65, 0.16, 0.32], [92, 0.1, 0.22]] as const) {
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now);
+      osc.frequency.exponentialRampToValueAtTime(freq * 0.62, now + dur);
+      g.gain.setValueAtTime(0.001, now);
+      g.gain.exponentialRampToValueAtTime(peak, now + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.001, now + dur);
+      osc.connect(g).connect(this.sfxBus ?? this.masterGain);
+      osc.start(now);
+      osc.stop(now + dur + 0.02);
+    }
+  }
+
   public triggerDopplerFlyby(relativeSpeedMs = 30, pan = 0): void {
     if (!this.ctx || !this.masterGain || this.isMuted) return;
     if (this.acoustics) {

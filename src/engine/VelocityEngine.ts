@@ -28,6 +28,12 @@ import {
   setPhotographicAssetsEnabled as setPhotoAssetsEnabled,
 } from '../render/PhotographicAssets';
 import { buildRacingLine, RacingLine, RacingLineFollower } from '../ai/RacingLine';
+import { computeGridSlots } from './raceGrid';
+import { paintGridSlots } from './gridPaint';
+import { StartSequence } from './startSequence';
+import { resolveContact } from './collision';
+import { SHAPE_PRESETS } from '../cars/CarBodyBuilder';
+import type { ImpactZone } from './collision';
 import { adjustBotSkill } from '../ai/difficulty';
 import { chaseBoom, computeChaseRoll, fitVerticalFov, speedFov } from './CameraRig';
 import { canSimulate, effectTraits, shouldPauseOnHide } from './GameStateRules';
@@ -52,6 +58,10 @@ interface BotRacerInstance {
   headingRad: number;
   follower?: RacingLineFollower;
   stuckTimer: number;
+  /** Reaction time after lights-out before the bot launches (FIA ~0.20–0.45 s). */
+  startReactionSec: number;
+  /** Last time (elapsedSec) this bot's contact with the player dealt damage — rate limiter. */
+  lastHitSec: number;
   /** Cached at spawn: recomputing effective stats per frame per bot allocates
    *  thousands of objects per second and shows up as GC stutter. */
   massKg: number;
@@ -62,6 +72,15 @@ interface BotRacerInstance {
 function nearestLateralGap(aheadM: number, lateralM: number): number {
   return Math.max(0, (18 - aheadM) * 0.09 + lateralM * 0.05);
 }
+
+/** Modes that use the FIA-style standing grid at the front of the field. */
+const STANDING_START_MODES: ReadonlySet<string> = new Set([
+  'career',
+  'quick_race',
+  'championship',
+  'multiplayer',
+  'revolt_legacy',
+]);
 
 interface GhostSample {
   x: number;
@@ -233,7 +252,11 @@ export class VelocityEngine {
   private lapStartSec = 0;
   private bestLapSec: number | null = null;
   private raceFinished = false;
-  private countdownSec = 3.0;
+  private startSequence: StartSequence | null = null;
+  private lastLampCount = 0;
+  private jumpStartWarned = false;
+  /** elapsedSec timestamp of lights-out (race clock), for bot reaction delays. */
+  private lightsOutElapsedSec: number | null = null;
   private dragReactionMs: number | null = null;
   private driftScore = 0;
   private driftCombo = 1;
@@ -716,6 +739,38 @@ export class VelocityEngine {
       }
     }
 
+    // ── STANDING-START GRID ─────────────────────────────────────────────
+    // Compute the FIA 1×1 staggered grid (slots 8 m apart, pole closest to
+    // the line, alternating lanes, pole on the racing-line side when the
+    // optimised line is known) and paint the boxes on the asphalt so the
+    // formation reads as a real grid instead of an imaginary convoy.
+    const standingStart = STANDING_START_MODES.has(config.mode);
+    const gridBotCount = config.mode === 'time_trial' ? 0 : config.mode === 'drag' ? 1 : config.botCount;
+    // Pole goes on the racing-line side when the optimised line is known.
+    const poleLane: 1 | -1 =
+      this.racingLine && Math.abs(this.racingLine.samples[0]?.offsetM ?? 0) > 0.4
+        ? (this.racingLine.samples[0].offsetM >= 0 ? 1 : -1)
+        : 1;
+    const gridSlots = standingStart
+      ? computeGridSlots({
+          botCount: gridBotCount,
+          roadWidth: this.trackWorld.roadWidth,
+          totalLengthM: this.trackWorld.totalLengthM,
+          firstSlotM: 12,
+          poleLane,
+        })
+      : [];
+    if (gridSlots.length > 0) {
+      const paint = paintGridSlots(
+        this.trackWorld.curve,
+        this.trackWorld.samplePoints,
+        this.trackWorld.totalLengthM,
+        this.trackWorld.roadWidth,
+        gridSlots
+      );
+      this.trackWorld.group.add(paint.group);
+    }
+
     this.playerRig = buildCarMesh(config.car, config.tune);
     this.scene.add(this.playerRig.root);
     this.playerBody.resetAt(
@@ -731,7 +786,7 @@ export class VelocityEngine {
 
     // Spawn AI Bot Drivers (or Police Cruisers in Police Chase!)
     this.bots = [];
-    const actualBots = config.mode === 'time_trial' ? 0 : config.mode === 'drag' ? 1 : config.botCount;
+    const actualBots = gridBotCount;
     const candidateCars = CAR_CATALOG.filter((c) => c.category === config.car.category);
 
     for (let i = 0; i < actualBots; i++) {
@@ -763,11 +818,21 @@ export class VelocityEngine {
         botRig.chassisGroup.add(sirenGroup);
       }
 
+      const slot = gridSlots[i];
       const startProg =
         config.mode === 'drag'
           ? 0.0
-          : (0.012 * (i + 1)) % 0.9;
-      const laneOff = config.mode === 'drag' ? 4.2 : ((i % 2 === 0 ? 1 : -1) * 3.1);
+          : slot
+            ? slot.progress
+            : (0.012 * (i + 1)) % 0.9;
+      const laneOff =
+        config.mode === 'drag'
+          ? 4.2
+          : slot
+            ? slot.lateralM
+            : i % 2 === 0
+              ? 3.1
+              : -3.1;
 
       this.scene.add(botRig.root);
       this.bots.push({
@@ -788,6 +853,8 @@ export class VelocityEngine {
         lastFlybyTime: 0,
         headingRad: Math.atan2(this.trackWorld!.curve.getTangentAt(startProg).x, this.trackWorld!.curve.getTangentAt(startProg).z),
         stuckTimer: 0,
+        startReactionSec: 0.22 + Math.random() * 0.24,
+        lastHitSec: -10,
         massKg: 0,
         maxAccelMs2: 0,
         follower: this.racingLine
@@ -829,8 +896,11 @@ export class VelocityEngine {
     // Reset counters
     this.playerLap = 1;
     this.lastSplineProgress = 0;
-    this.countdownSec = 3.0;
-    this.lapStartSec = this.elapsedSec + 3.0;
+    this.startSequence = new StartSequence({ lampPairs: 5, lightIntervalSec: 0.9 });
+    this.lastLampCount = 0;
+    this.jumpStartWarned = false;
+    this.lightsOutElapsedSec = null;
+    this.lapStartSec = this.elapsedSec + 10.0; // corrected at lights-out
     this.bestLapSec = null;
     this.dragReactionMs = null;
     this.driftScore = 0;
@@ -1412,9 +1482,24 @@ export class VelocityEngine {
       Math.cos(this.currentWeather.windAngleRad) * windMs
     );
 
-    // Pre-race Countdown
-    if (this.countdownSec > 0) {
-      this.countdownSec = Math.max(0, this.countdownSec - dt);
+    // ── FIA START PROCEDURE ──────────────────────────────────────────────
+    // Five lamp pairs light one at a time on the gantry, hold for a random
+    // 0.2–3.0 s, then extinguish ALL AT ONCE. The cars are released by the
+    // sequence — never by a wall-clock countdown.
+    if (this.startSequence) {
+      const wasLit = this.lastLampCount;
+      const lightsOut = this.startSequence.update(dt);
+      const lit = this.startSequence.lampsLit;
+      if (lit > wasLit) {
+        for (let p = wasLit; p < lit; p++) audioEngine.triggerStartLamp(p);
+      }
+      this.lastLampCount = lit;
+      this.updateGantryLamps(lit);
+      if (lightsOut) {
+        this.lapStartSec = this.elapsedSec;
+        this.lightsOutElapsedSec = this.elapsedSec;
+        audioEngine.triggerLightsOut();
+      }
     }
 
     // Gather Player Controls (Keyboard + Touch)
@@ -1430,7 +1515,7 @@ export class VelocityEngine {
     const nitroInput = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') || this.touchControls.nitro;
 
     // Drag Reaction Time Measurement
-    if (this.currentMode === 'drag' && this.countdownSec <= 0 && this.dragReactionMs === null && rawThrottle > 0.2) {
+    if (this.currentMode === 'drag' && (this.startSequence?.readyToMove ?? true) && this.dragReactionMs === null && rawThrottle > 0.2) {
       this.dragReactionMs = Math.round(Math.random() * 45 + 95);
     }
 
@@ -1443,7 +1528,24 @@ export class VelocityEngine {
       terminated: this.terminated,
       photoModeActive: this.photoModeActive,
     });
-    const canMove = simAllowed && this.countdownSec <= 0 && !this.raceFinished;
+    const canMove = simAllowed && (this.startSequence?.readyToMove ?? true) && !this.raceFinished;
+
+    // Jump start: feeding throttle while the five red pairs are lit. FIA
+    // penalises this; we warn once, dock stewards' patience and make the
+    // player feel it in the radio rather than silently eating the input.
+    if (this.startSequence && !this.startSequence.readyToMove && rawThrottle > 0.15 && !this.jumpStartWarned) {
+      this.jumpStartWarned = true;
+      this.antiTrollWarnings++;
+      this.slowdownPenaltyTimer = Math.max(this.slowdownPenaltyTimer, 2.0);
+      this.emitRadio({
+        senderName: 'Direção de Prova FIA-Velocity',
+        callsign: 'RACE-CTRL',
+        nationality: this.currentTrack?.country ?? 'FIA',
+        relation: 'race_control',
+        text: 'JUMP START! Movimentou o carro antes dos cinco pares apagarem. 2s de limitação aplicada!',
+        lang: 'pt-BR',
+      });
+    }
     if (this.slowdownPenaltyTimer > 0) this.slowdownPenaltyTimer = Math.max(0, this.slowdownPenaltyTimer - dt);
     const penaltyCap = this.slowdownPenaltyTimer > 0 ? 0.35 : 1.0;
 
@@ -1790,12 +1892,39 @@ export class VelocityEngine {
       deliveriesCompleted: this.deliveriesCompleted,
       activePowerup: this.activePowerup,
       antiTrollWarnings: this.antiTrollWarnings,
+      startLightsLit: this.startSequence?.lampsLit ?? 0,
+      startLightPhase: this.startSequence
+        ? this.startSequence.readyToMove
+          ? this.lightsOutElapsedSec !== null && this.elapsedSec - this.lightsOutElapsedSec < 2.5
+            ? 'out'
+            : 'rolling'
+          : this.startSequence.phase
+        : 'rolling',
     };
 
     if (this.telemetryLog.length < 4500 && Math.floor(this.elapsedSec * 10) > this.telemetryLog.length) {
       this.telemetryLog.push(frame);
     }
     this.callbacks.onTelemetry(frame);
+  }
+
+  /**
+   * Drives the five red lamp pairs hanging from the start gantry. `litPairs`
+   * (0..5) is how many pairs are currently on; after lights-out every lamp
+   * goes dark at once (FIA procedure — there is no green phase).
+   */
+  private updateGantryLamps(litPairs: number): void {
+    const lamps = this.trackWorld?.startLamps;
+    if (!lamps || lamps.length !== 10) return;
+    for (let pair = 0; pair < 5; pair++) {
+      const on = pair < litPairs;
+      for (const j of [pair * 2, pair * 2 + 1]) {
+        const lamp = lamps[j];
+        const mat = lamp.material as THREE.MeshStandardMaterial;
+        mat.emissiveIntensity = on ? 3.4 : 0.04;
+        mat.color.setHex(on ? 0x401010 : 0x1a0505);
+      }
+    }
   }
 
   private stepBots(dt: number, canMove: boolean, playerSteer: number, playerSpeedKmh: number, isNight: boolean): void {
@@ -1865,7 +1994,14 @@ export class VelocityEngine {
         cornerCurvature = turnSharpness;
       }
 
-      if (!canMove) {
+      // Bots react to lights-out with a human-range delay (0.22–0.46 s), not
+      // on the same frame as the extinguish — an eight-car field launching
+      // the same millisecond is the cheapest start exploit in any racing game.
+      const botReady =
+        canMove &&
+        (this.lightsOutElapsedSec === null ||
+          this.elapsedSec - this.lightsOutElapsedSec >= b.startReactionSec);
+      if (!botReady) {
         throttle = 0;
         brake = 1;
       }
@@ -1973,27 +2109,61 @@ export class VelocityEngine {
         audioEngine.triggerDopplerFlyby();
       }
 
-      // Car-to-Car Collision, Rivalry System & Multiplayer Anti-Troll Analysis!
-      if (distToPlayer < 2.95) {
-        const pushX = this.playerBody.x - root.position.x;
-        const pushZ = this.playerBody.z - root.position.z;
-        const pLen = Math.max(0.1, Math.hypot(pushX, pushZ));
-        this.playerBody.x += (pushX / pLen) * 0.95;
-        this.playerBody.z += (pushZ / pLen) * 0.95;
+      // ── Car-to-car contact: oriented boxes, not a 2.95 m sphere ─────────
+      // The old code used a centre-distance test, teleported the player 0.95 m
+      // regardless of approach angle and ALWAYS dented the front. Two cars
+      // sliding door-to-door touch at ~1.9 m of side-by-side overlap while two
+      // noses touch at ~4.6 m of closing distance — a sphere can do neither.
+      // Box-vs-box gives the correct impact face (front/left/right/rear) from
+      // geometry, splits the separation push between both cars, and rate-limits
+      // damage so one long scrape is one hit, not sixty.
+      const playerShape = SHAPE_PRESETS[this.currentCar?.archetype ?? 'sedan_tuner'];
+      const botShape = SHAPE_PRESETS[b.carSpec.archetype] ?? playerShape;
+      const contact = resolveContact(
+        this.playerBody.x,
+        this.playerBody.z,
+        this.playerBody.headingRad,
+        playerShape.length * 0.5,
+        playerShape.width * 0.5,
+        root.position.x,
+        root.position.z,
+        b.headingRad,
+        botShape.length * 0.5,
+        botShape.width * 0.5
+      );
+      if (contact.touching) {
+        // Positional separation: player takes the larger share, the bot yields
+        // too (it is not glued to rails any more).
+        if (contact.movePlayer > 0) {
+          this.playerBody.x -= contact.normalX * contact.movePlayer;
+          this.playerBody.z -= contact.normalZ * contact.movePlayer;
+        }
+        if (contact.moveOther > 0) {
+          root.position.x += contact.normalX * contact.moveOther;
+          root.position.z += contact.normalZ * contact.moveOther;
+        }
+        // Exchange a fraction of momentum along the contact normal so a shunt
+        // that should bounce the cars apart does not glue them together.
         this.playerBody.vx *= 0.82;
         this.playerBody.vz *= 0.82;
 
-        const impactKmh = Math.max(20, relSpeed);
-        this.playerBody.applyImpact(impactKmh, 'front', this.damageEnabled && this.shieldTimer <= 0);
-        this.packageIntegrityPct = Math.max(0, this.packageIntegrityPct - 9);
-        audioEngine.triggerCollision(0.75);
+        // Damage is dealt at most once per 0.6 s per car pair.
+        const damageEvent = this.elapsedSec - b.lastHitSec >= 0.6;
+        if (damageEvent) {
+          b.lastHitSec = this.elapsedSec;
+          const impactKmh = Math.max(20, relSpeed);
+          const zone: ImpactZone = contact.zone;
+          this.playerBody.applyImpact(impactKmh, zone, this.damageEnabled && this.shieldTimer <= 0);
+          this.packageIntegrityPct = Math.max(0, this.packageIntegrityPct - (zone === 'front' ? 9 : zone === 'rear' ? 4 : 6));
+          audioEngine.triggerCollision(zone === 'front' ? 0.75 : 0.45);
 
-        if (this.currentMode === 'derby') {
-          b.health -= 34;
+          if (this.currentMode === 'derby') {
+            b.health -= 34;
+          }
         }
 
         // Anti-Troll Detector in Multiplayer Mode: Did the player steer directly toward the bot?
-        if (this.currentMode === 'multiplayer' && Math.abs(playerSteer) > 0.45 && playerSpeedKmh > 60) {
+        if (damageEvent && this.currentMode === 'multiplayer' && Math.abs(playerSteer) > 0.45 && playerSpeedKmh > 60) {
           this.antiTrollWarnings++;
           if (this.antiTrollWarnings >= 2) {
             this.slowdownPenaltyTimer = 4.5;
@@ -2012,7 +2182,7 @@ export class VelocityEngine {
         }
 
         // Rivalry escalation & Radio Voice Acting!
-        if (this.elapsedSec - b.lastFlybyTime > 1.8) {
+        if (damageEvent && this.elapsedSec - b.lastFlybyTime > 1.8) {
           b.lastFlybyTime = this.elapsedSec;
           b.rivalryScore++;
           this.persistentRivalry.set(b.profile.id, b.rivalryScore);

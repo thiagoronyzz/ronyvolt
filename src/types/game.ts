@@ -368,6 +368,10 @@ export interface LiveTelemetryFrame {
   deliveriesCompleted: number;
   activePowerup: RevoltPowerup | null;
   antiTrollWarnings: number;
+  /** FIA start lights: how many of the five red pairs are currently lit (0-5). */
+  startLightsLit?: number;
+  /** Start procedure phase — 'out' means lights just extinguished (race is live). */
+  startLightPhase?: 'sequence' | 'hold' | 'out' | 'rolling';
 }
 
 export type RevoltPowerup =

@@ -145,8 +145,56 @@ export const RaceHud: React.FC<HudProps> = ({
 
   const rpmPct = Math.min(100, (frame.rpm / Math.max(1000, frame.maxRpm)) * 100);
 
+  // FIA start procedure overlay: five red lamp PAIRS on the top-centre of the
+  // screen, lit in sequence, held, then all extinguished at once ("lights
+  // out"). Mirrors the gantry lamps hanging over the start line.
+  const startPhase = frame.startLightPhase;
+  const showStartLights = startPhase === 'sequence' || startPhase === 'hold' || startPhase === 'out';
+  const litPairs = frame.startLightsLit ?? 0;
+
   return (
     <>
+      {showStartLights && (
+        <div
+          aria-label="Luzes de largada"
+          style={{
+            position: 'fixed',
+            top: 58,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 25,
+            display: 'flex',
+            gap: 10,
+            padding: '10px 14px',
+            background: 'rgba(5,8,14,0.82)',
+            border: '1px solid rgba(255,255,255,0.14)',
+            borderRadius: 10,
+            boxShadow: '0 6px 28px rgba(0,0,0,0.55)',
+          }}
+        >
+          {Array.from({ length: 5 }, (_, i) => {
+            const lit = i < litPairs;
+            return (
+              <div key={i} style={{ display: 'flex', gap: 5 }}>
+                {[0, 1].map((k) => (
+                  <span
+                    key={k}
+                    style={{
+                      width: 17,
+                      height: 17,
+                      borderRadius: '50%',
+                      background: lit ? '#ff2118' : '#230a0a',
+                      border: lit ? '1px solid #ff8a7a' : '1px solid #3a1c1c',
+                      boxShadow: lit ? '0 0 12px 3px rgba(255,45,32,0.75)' : 'none',
+                      transition: 'background 90ms, box-shadow 90ms',
+                    }}
+                  />
+                ))}
+              </div>
+            );
+          })}
+        </div>
+      )}
       {/* Top Race Action Bar */}
       <div className="hud-topbar">
         {/* Position, Lap & Timers */}
