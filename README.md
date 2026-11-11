@@ -48,7 +48,11 @@ O diagnóstico completo está em **[`docs/REALISM_AUDIT.md`](docs/REALISM_AUDIT.
 | Áudio | 3 osciladores em frequências arbitrárias | **ordem de combustão** `rpm/60 × cil/2`, harmônicos por arquitetura, ressonância de escape, intake, convolução por ambiente, superfícies, **Doppler físico** |
 | Pista | textura 512 px esticada na volta inteira | UV métrico + normal/roughness procedurais + material físico com clearcoat por clima |
 
-Verificação: `npm run test` → 22 testes (invariantes físicos, perfil de IA, acústica, Doppler) · `npm run build` → limpo.
+### PASSO 3 — Fotografia real + MP3 na estrada
+
+O terceiro passo está em **[`docs/REALISM_PASS_3.md`](docs/REALISM_PASS_3.md)**. Em resumo: 8 fotografias reais licenciadas (Unsplash / domínio público / ESO CC BY 4.0) viraram 17 mapas PBR derivados — asfalto com agregado medido, normal/roughness/AO por Sobel e variância local, grama, casca, nuvens reais, IBL equiretangular dia/noite, farol e lanterna de carros reais. Há um interruptor A/B em **Configurações → Gráficos** e uma janela de créditos com procedência de cada foto. A cadeia "importar MP3 → fechar modal → correr → play" foi validada em Chromium real.
+
+Verificação: `npm run test` → **19 arquivos / 121 testes** (invariantes físicos, perfil de IA, acústica, Doppler, fila de MP3, pipeline fotográfico) · `npm run build` → limpo · `npx vite-node tools/soundcheck.ts` → sequenciador limpo · `npm run assets:photos` → 17 mapas + 8 miniaturas.
 
 ---
 

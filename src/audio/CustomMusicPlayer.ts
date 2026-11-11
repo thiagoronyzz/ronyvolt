@@ -1,14 +1,25 @@
 /**
- * CUSTOM MUSIC PLAYER — queue playback for player-imported files.
- * ---------------------------------------------------------------
- * Owns a single HTMLAudioElement routed through WebAudio (so it shares the
- * music bus, the bass analyser and the engine duck) with its OWN gain node,
- * so "Minhas Músicas" volume is independent from the engine and SFX.
+ * CUSTOM MUSIC PLAYER — queue playback for player-imported files
+ * ============================================================
  *
- * The element is created lazily on the first user gesture (browsers block
- * audio before that). Object URLs are created from library blobs and revoked
- * when tracks are removed or replaced — the previous build created a URL per
- * file and never revoked it.
+ * Owns ONE HTMLAudioElement, optionally routed through WebAudio (so it shares
+ * the music analyser and the engine duck) with its own gain node. The element
+ * is created lazily on the first play/attach call: browsers block audio before
+ * a user gesture, and the old build returned silently from `play()` whenever
+ * `attach()` had not run yet — the other half of the "cliquei e nada acontece"
+ * report.
+ *
+ * Fixes in this version:
+ *  - `play()` works even before `audioEngine.init()` (direct output fallback).
+ *  - A suspended AudioContext is resumed on every play, not only on the very
+ *    first global gesture.
+ *  - `play()` rejects with AbortError when a second play changes `src` in the
+ *    same tick; stale rejections are ignored instead of flipping the UI to
+ *    "paused" while the second track is actually playing.
+ *  - Media errors are surfaced with a human-readable message instead of being
+ *    swallowed by an empty `catch`.
+ *  - A pending play blocked by autoplay policy is retried on the next gesture.
+ *  - Time / duration are published so the HUD can show real progress.
  */
 
 import { nextIndex, prevIndex, PlayMode } from './CustomMusicLibrary';
@@ -19,6 +30,8 @@ export interface CustomQueueTrack {
   url: string;
 }
 
+export type CustomPlaybackStatus = 'idle' | 'loading' | 'playing' | 'paused' | 'blocked' | 'error';
+
 export interface CustomPlayerState {
   index: number;
   playing: boolean;
@@ -27,50 +40,163 @@ export interface CustomPlayerState {
   mode: PlayMode;
   volume: number;
   count: number;
+  status: CustomPlaybackStatus;
+  error: string | null;
+  currentTime: number;
+  duration: number;
 }
 
 type Listener = (state: CustomPlayerState) => void;
 
+function describeMediaError(code: number | undefined, name?: string): string {
+  switch (code) {
+    case 1:
+      return 'Reprodução abortada pelo navegador.';
+    case 2:
+      return 'Falha de rede ao ler o arquivo importado.';
+    case 3:
+      return 'Este formato de áudio não é suportado pelo navegador.';
+    case 4:
+      return 'Arquivo de áudio corrompido ou em formato não suportado.';
+    default:
+      return name ? `Não foi possível tocar a faixa (${name}).` : 'Não foi possível tocar a faixa.';
+  }
+}
+
 export class CustomMusicPlayer {
   private el: HTMLAudioElement | null = null;
   private sourceNode: MediaElementAudioSourceNode | null = null;
+  private sourceContext: AudioContext | null = null;
   private gain: GainNode | null = null;
   private ctx: AudioContext | null = null;
+  private destination: AudioNode | null = null;
 
   private tracks: CustomQueueTrack[] = [];
   private index = -1;
   private playing = false;
+  /** User intent. Stays true through the transient `pause` fired by load(). */
+  private desiredPlaying = false;
+  /** A play() blocked by autoplay policy, waiting for the next real gesture. */
+  private pendingPlay = false;
   private mode: PlayMode = 'sequential';
   private volume = 0.8;
+  private status: CustomPlaybackStatus = 'idle';
+  private error: string | null = null;
+  private currentTime = 0;
+  private duration = 0;
+  private playToken = 0;
   private listeners = new Set<Listener>();
 
   /** Route the element through WebAudio. Safe to call repeatedly. */
   public attach(ctx: AudioContext, destination: AudioNode): void {
-    this.ctx = ctx;
-    if (!this.el) {
-      this.el = new Audio();
-      this.el.preload = 'auto';
-      this.el.addEventListener('ended', () => this.handleEnded());
-      this.el.addEventListener('play', () => {
-        this.playing = true;
-        this.emit();
-      });
-      this.el.addEventListener('pause', () => {
-        this.playing = false;
-        this.emit();
-      });
-    }
-    if (!this.sourceNode) {
+    const contextChanged = this.sourceContext !== null && this.sourceContext !== ctx;
+    if (contextChanged) {
+      // createMediaElementSource() can only be called once per element. If the
+      // context was recreated (HMR / reset), rebuild the element and resume the
+      // same queue position instead of leaving a permanently silent node.
+      const wasPlaying = this.desiredPlaying;
+      const resumeIndex = this.index;
+      this.el?.pause();
       try {
-        this.sourceNode = ctx.createMediaElementSource(this.el);
-        this.gain = ctx.createGain();
-        this.gain.gain.value = this.volume;
-        this.sourceNode.connect(this.gain).connect(destination);
+        this.sourceNode?.disconnect();
+        this.gain?.disconnect();
       } catch {
-        // Element already routed (e.g. after a context re-init) — play direct.
-        this.sourceNode = null;
-        this.gain = null;
+        /* already disconnected */
       }
+      this.sourceNode = null;
+      this.gain = null;
+      this.sourceContext = null;
+      this.el = null;
+      this.ctx = ctx;
+      this.destination = destination;
+      this.ensureElement();
+      this.routeToWebAudio();
+      if (wasPlaying && resumeIndex >= 0) this.play(resumeIndex);
+      return;
+    }
+
+    this.ctx = ctx;
+    this.destination = destination;
+    this.ensureElement();
+    this.routeToWebAudio();
+  }
+
+  private ensureElement(): HTMLAudioElement | null {
+    if (this.el) return this.el;
+    if (typeof Audio === 'undefined') return null;
+
+    const el = new Audio();
+    el.preload = 'auto';
+    el.volume = 1;
+
+    const markPlaying = () => {
+      if (!this.desiredPlaying) return;
+      this.playing = true;
+      this.pendingPlay = false;
+      this.status = 'playing';
+      this.error = null;
+      this.emit();
+    };
+    el.addEventListener('play', markPlaying);
+    // A looping/short track can go ended → waiting → playing without a new
+    // 'play' event. Without this the UI stayed stuck on "carregando…" forever.
+    el.addEventListener('playing', markPlaying);
+    el.addEventListener('pause', () => {
+      this.playing = false;
+      // load() fires a transient pause; keep the intent so the UI does not
+      // flash "paused" while the new track is being prepared.
+      this.status = this.desiredPlaying ? 'loading' : 'paused';
+      this.emit();
+    });
+    el.addEventListener('ended', () => this.handleEnded());
+    el.addEventListener('waiting', () => {
+      if (this.desiredPlaying) {
+        this.status = 'loading';
+        this.emit();
+      }
+    });
+    el.addEventListener('loadedmetadata', () => {
+      this.duration = Number.isFinite(el.duration) ? el.duration : 0;
+      this.emit();
+    });
+    el.addEventListener('durationchange', () => {
+      this.duration = Number.isFinite(el.duration) ? el.duration : 0;
+    });
+    el.addEventListener('timeupdate', () => {
+      this.currentTime = Number.isFinite(el.currentTime) ? el.currentTime : 0;
+      // 4 Hz is enough for a progress bar; the game already runs at 60 fps.
+      if (Math.floor(this.currentTime * 4) !== Math.floor((this.currentTime - 0.26) * 4)) this.emit();
+    });
+    el.addEventListener('error', () => {
+      this.playing = false;
+      this.desiredPlaying = false;
+      this.pendingPlay = false;
+      this.status = 'error';
+      this.error = describeMediaError(el.error?.code);
+      this.emit();
+    });
+
+    this.el = el;
+    return el;
+  }
+
+  private routeToWebAudio(): void {
+    if (!this.ctx || !this.destination || !this.el || this.sourceNode) return;
+    try {
+      this.sourceNode = this.ctx.createMediaElementSource(this.el);
+      this.sourceContext = this.ctx;
+      this.gain = this.ctx.createGain();
+      this.gain.gain.value = this.volume;
+      this.sourceNode.connect(this.gain).connect(this.destination);
+      // WebAudio owns the level now; keeping el.volume < 1 double-attenuates.
+      this.el.volume = 1;
+    } catch {
+      // The element is already routed (or MediaElementSource is unsupported):
+      // fall back to direct output so playback still works.
+      this.sourceNode = null;
+      this.gain = null;
+      this.sourceContext = null;
+      if (this.el) this.el.volume = this.volume;
     }
   }
 
@@ -95,6 +221,10 @@ export class CustomMusicPlayer {
       mode: this.mode,
       volume: this.volume,
       count: this.tracks.length,
+      status: this.status,
+      error: this.error,
+      currentTime: this.currentTime,
+      duration: this.duration,
     };
   }
 
@@ -105,16 +235,32 @@ export class CustomMusicPlayer {
     if (currentId) {
       const at = this.tracks.findIndex((t) => t.id === currentId);
       this.index = at;
-      if (at === -1 && this.el) {
-        this.el.pause();
-        this.el.removeAttribute('src');
-        this.el.load();
-        this.playing = false;
-      }
+      if (at === -1) this.stopElement();
     } else {
       this.index = -1;
     }
+    if (this.tracks.length === 0) {
+      this.status = 'idle';
+      this.playing = false;
+      this.desiredPlaying = false;
+      this.pendingPlay = false;
+      this.currentTime = 0;
+      this.duration = 0;
+    }
     this.emit();
+  }
+
+  private stopElement(): void {
+    if (!this.el) return;
+    this.el.pause();
+    this.el.removeAttribute('src');
+    this.el.load();
+    this.playing = false;
+    this.desiredPlaying = false;
+    this.pendingPlay = false;
+    this.currentTime = 0;
+    this.duration = 0;
+    this.status = 'paused';
   }
 
   public setMode(mode: PlayMode): void {
@@ -127,11 +273,9 @@ export class CustomMusicPlayer {
     if (this.gain && this.ctx) {
       this.gain.gain.setTargetAtTime(this.volume, this.ctx.currentTime, 0.05);
     }
-    // The element stays at unity: routing it through WebAudio already gives us
-    // the gain node, and lowering el.volume as well double-attenuates (80 %
-    // became 64 %, 50 % became 25 % — a volume slider that did not match its
-    // label).
-    if (this.el) this.el.volume = 1;
+    // When routed through WebAudio the element stays at unity; otherwise the
+    // element itself is the only volume control.
+    if (this.el) this.el.volume = this.sourceNode ? 1 : this.volume;
     this.emit();
   }
 
@@ -140,46 +284,77 @@ export class CustomMusicPlayer {
   }
 
   public play(index?: number): void {
-    if (!this.el || this.tracks.length === 0) return;
+    const el = this.ensureElement();
+    if (!el || this.tracks.length === 0) return;
     const target = index !== undefined ? index : this.index >= 0 ? this.index : 0;
     if (target < 0 || target >= this.tracks.length) return;
     const track = this.tracks[target];
-    if (this.index !== target || this.el.getAttribute('src') !== track.url) {
+
+    this.desiredPlaying = true;
+    this.pendingPlay = true;
+    this.error = null;
+    const token = ++this.playToken;
+
+    if (this.index !== target || el.getAttribute('src') !== track.url) {
       this.index = target;
-      this.el.src = track.url;
-      this.el.load();
+      this.currentTime = 0;
+      this.duration = 0;
+      el.src = track.url;
+      el.load();
     }
-    this.el.play().catch(() => {
-      this.playing = false;
-      this.emit();
-    });
+    this.status = 'loading';
+
+    // A click is a user gesture: resume here too, not only in the app-wide
+    // first-gesture listener (which may have fired on a different control).
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+
+    const promise = el.play();
+    if (promise && typeof promise.catch === 'function') {
+      promise.catch((err: unknown) => {
+        if (token !== this.playToken || !this.desiredPlaying) return; // superseded
+        const name = err instanceof Error ? err.name : '';
+        if (name === 'AbortError') return; // a newer play() replaced this src
+        this.playing = false;
+        if (name === 'NotAllowedError' || name === 'SecurityError') {
+          this.status = 'blocked';
+          this.pendingPlay = true; // a spurious 'play' event may have cleared it
+          this.error = 'Toque novamente para liberar o áudio do navegador.';
+        } else {
+          this.status = 'error';
+          this.error = describeMediaError(undefined, name);
+        }
+        this.emit();
+      });
+    }
     this.emit();
   }
 
   public pause(): void {
+    this.desiredPlaying = false;
+    this.pendingPlay = false;
+    this.playToken++;
     this.el?.pause();
+    this.status = 'paused';
+    this.emit();
   }
 
   public toggle(): void {
-    if (this.playing) this.pause();
+    if (this.desiredPlaying || this.playing) this.pause();
     else this.play();
   }
 
   /**
-   * Browsers block `play()` until a user gesture unlocked the AudioContext.
-   * If the first attempt was rejected, the element is already loaded — this
-   * retries it from the next real user interaction (HUD button, pause menu).
+   * Retries a play that was blocked by autoplay policy. Called from the app's
+   * first real gesture. Does NOT resume a track the user explicitly paused.
    */
   public resumeIfLoaded(): void {
-    if (!this.el || this.tracks.length === 0) return;
-    if (this.index < 0) return;
-    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
-    if (!this.playing) {
-      this.el.play().catch(() => {
-        this.playing = false;
-        this.emit();
-      });
+    if (!this.pendingPlay || this.tracks.length === 0) {
+      if (this.ctx && this.ctx.state === 'suspended' && this.desiredPlaying) {
+        this.ctx.resume().catch(() => {});
+      }
+      return;
     }
+    this.play();
   }
 
   public next(): void {
@@ -192,19 +367,26 @@ export class CustomMusicPlayer {
     this.play(prevIndex(this.index, this.tracks.length));
   }
 
+  public seek(fraction: number): void {
+    if (!this.el || this.duration <= 0) return;
+    const clamped = Math.max(0, Math.min(1, fraction));
+    this.el.currentTime = clamped * this.duration;
+    this.currentTime = this.el.currentTime;
+    this.emit();
+  }
+
   private handleEnded(): void {
     if (this.mode === 'loop_one') {
+      if (this.el) this.el.currentTime = 0;
       this.play(this.index);
       return;
     }
     this.next();
   }
 
-  /** Stop and release the element (used on full teardown). */
+  /** Stop and release the element (full teardown). */
   public dispose(): void {
-    this.el?.pause();
-    this.el?.removeAttribute('src');
-    this.el?.load();
+    this.stopElement();
     this.listeners.clear();
   }
 }

@@ -3,6 +3,7 @@ import { AcousticEnvironment, EngineAcoustics } from './EngineAcoustics';
 import { soundtrackPlayer } from './SoundtrackPlayer';
 import { DEFAULT_PLAYLIST } from './Soundtrack';
 import { customMusicPlayer } from './CustomMusicPlayer';
+import { customMusicMedia } from './CustomMusicMedia';
 
 export interface RadioStationSpec {
   id: string;
@@ -57,8 +58,6 @@ export class VelocityAudioEngine {
   private musicPausedByMenu = false;
   private wasSoundtrackPlaying = false;
   private wasCustomPlaying = false;
-  private customAudioEl: HTMLAudioElement | null = null;
-  private customMediaNode: MediaElementAudioSourceNode | null = null;
 
   private isMuted = false;
   private currentStationId = 'soundtrack';
@@ -391,7 +390,7 @@ export class VelocityAudioEngine {
   }
 
   public pauseForMenu(): void {
-    if (!this.ctx) return;
+    if (!this.ctx || this.menuPaused) return;
     const now = this.ctx.currentTime;
     this.menuPaused = true;
     // Duck the whole mix instead of stopping nodes: no click, no rebuild cost.
@@ -417,12 +416,19 @@ export class VelocityAudioEngine {
   public resumeFromMenu(): void {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
+    void now;
+    const wasPaused = this.menuPaused;
     this.menuPaused = false;
+    // Always restore the master bus, even when the pause flag was stale. A
+    // stale `menuPaused = true` was the reason a race could start completely
+    // silent after pausing/leaving a previous session.
     this.applyMasterGain();
     if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
-    if (this.musicPausedByMenu) {
-      if (this.wasCustomPlaying) customMusicPlayer.play();
-      else if (this.wasSoundtrackPlaying) soundtrackPlayer.ensurePlaying();
+    if (wasPaused && this.musicPausedByMenu) {
+      // Only resume the source that is actually selected. The old code resumed
+      // an MP3 even after the player switched to "radio off" while paused.
+      if (this.wasCustomPlaying && this.currentStationId === 'custom_usb') customMusicPlayer.play();
+      else if (this.wasSoundtrackPlaying && this.currentStationId === 'soundtrack') soundtrackPlayer.ensurePlaying();
       this.musicPausedByMenu = false;
     }
   }
@@ -437,18 +443,85 @@ export class VelocityAudioEngine {
   }
 
   public setMusicMode(mode: 'game' | 'mine'): void {
-    this.setStation(mode === 'mine' ? 'custom_usb' : 'soundtrack');
+    if (mode === 'mine') {
+      this.playCustom();
+    } else {
+      this.setStation('soundtrack');
+    }
   }
 
-  public setStation(stationId: string): void {
+  /**
+   * Every "play" button ends up here. A race can be left with `menuPaused` set
+   * (pause menu → garage → new race), which mutes the master bus at 0 even
+   * though MP3 playback looks healthy in the UI. Restore the bus before asking
+   * the element to play, but suppress the automatic "resume what was playing"
+   * branch of resumeFromMenu(): the caller is about to start a specific track
+   * itself, and two play() calls in one tick produce an AbortError.
+   */
+  private ensureAudible(): void {
+    this.init();
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    if (this.menuPaused) {
+      this.musicPausedByMenu = false;
+      this.resumeFromMenu();
+    }
+  }
+
+  /**
+   * Single entry point for "Minhas Músicas" play buttons (garage panel, HUD
+   * mini-player, track rows). It sets the station WITHOUT the implicit play in
+   * `setStation()` and then calls `play()` exactly once — the old double play
+   * made the first `play()` reject with AbortError and the UI flip to "paused".
+   */
+  public playCustom(index?: number): void {
+    this.ensureAudible();
+    this.setStation('custom_usb', false);
+    customMusicPlayer.play(index);
+  }
+
+  /** Transport controls shared by the garage panel and the in-race HUD. */
+  public customToggle(): void {
+    this.ensureAudible();
+    const s = customMusicPlayer.getState();
+    if (s.playing || s.status === 'loading') {
+      this.setStation('custom_usb', false);
+      customMusicPlayer.pause();
+      // The user paused explicitly: do not auto-resume on the next
+      // resumeFromMenu() (race start / pause menu close).
+      this.musicPausedByMenu = false;
+      this.wasCustomPlaying = false;
+    } else {
+      this.playCustom();
+    }
+  }
+
+  public customNext(): void {
+    this.ensureAudible();
+    this.setStation('custom_usb', false);
+    customMusicPlayer.next();
+  }
+
+  public customPrevious(): void {
+    this.ensureAudible();
+    this.setStation('custom_usb', false);
+    customMusicPlayer.previous();
+  }
+
+  public setStation(stationId: string, autoplayCustom = true): void {
     // Any gesture from the UI should be enough to unblock audio on browsers
     // that start an AudioContext in the "suspended" state.
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    // Changing the source while paused must not resurrect the old MP3 when the
+    // pause menu closes.
+    if (stationId !== this.currentStationId) this.musicPausedByMenu = false;
     this.currentStationId = stationId;
     // Imported MP3s ("Minhas Músicas") play only on the custom_usb station;
     // every other station pauses them so two beds never overlap.
     if (stationId === 'custom_usb') {
-      customMusicPlayer.play();
+      if (autoplayCustom) {
+        const s = customMusicPlayer.getState();
+        if (s.status !== 'playing' && s.status !== 'loading') customMusicPlayer.play();
+      }
     } else {
       customMusicPlayer.pause();
     }
@@ -549,18 +622,18 @@ export class VelocityAudioEngine {
     return this.currentStationId;
   }
 
-  public loadCustomMusicFile(file: File): void {
+  /**
+   * Legacy "load one MP3" entry point (Tuning Cathedral). It used to create a
+   * SECOND AudioElement looping forever on the soundtrack bus, while
+   * `setStation('custom_usb')` also started the queue player — two songs at
+   * once. Now it feeds the same persistent library/queue as the music panel.
+   */
+  public async loadCustomMusicFile(file: File): Promise<void> {
     this.init();
-    if (!this.ctx || !this.musicGain) return;
-    const url = URL.createObjectURL(file);
-    if (!this.customAudioEl) {
-      this.customAudioEl = new Audio();
-      this.customAudioEl.loop = true;
-      this.customMediaNode = this.ctx.createMediaElementSource(this.customAudioEl);
-      this.customMediaNode.connect(this.musicGain);
-    }
-    this.customAudioEl.src = url;
-    this.setStation('custom_usb');
+    await customMusicMedia.addFiles([file]);
+    const views = customMusicMedia.getViews();
+    const index = views.findIndex((v) => v.name === file.name);
+    this.playCustom(index >= 0 ? index : 0);
   }
 
   /**

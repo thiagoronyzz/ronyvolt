@@ -8,7 +8,8 @@
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 4173",
-    "test": "vitest run"
+    "test": "vitest run",
+    "assets:photos": "node tools/build-photo-assets.mjs"
   },
   "dependencies": {
     "@fontsource/archivo": "^5.3.0",
@@ -23,6 +24,8 @@
     "@types/react-dom": "^18.3.1",
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0",
     "puppeteer-core": "^23.11.1",
     "typescript": "^5.6.3",
     "vite": "^6.0.3",

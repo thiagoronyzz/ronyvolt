@@ -67,6 +67,13 @@ export const RaceHud: React.FC<HudProps> = ({
 }) => {
   const [stationId, setStationId] = useState(audioEngine.getStation());
 
+  // The mini-player and the music modal can change the station too. Without
+  // this poll the <select> kept showing the old radio while MP3s were playing.
+  useEffect(() => {
+    const id = window.setInterval(() => setStationId(audioEngine.getStation()), 500);
+    return () => window.clearInterval(id);
+  }, []);
+
   const formatTime = (sec: number) => {
     const mins = Math.floor(sec / 60);
     const rem = (sec % 60).toFixed(2).padStart(5, '0');
@@ -452,22 +459,28 @@ const MiniPlayer: React.FC = () => {
   const [mode, setMode] = useState<'game' | 'mine'>(() => audioEngine.getMusicMode());
   useEffect(() => {
     const unsub = customMusicPlayer.subscribe(setState);
-    const id = window.setInterval(() => setMode(audioEngine.getMusicMode()), 1200);
+    const id = window.setInterval(() => setMode(audioEngine.getMusicMode()), 500);
     return () => {
       unsub();
       window.clearInterval(id);
     };
   }, []);
   if (state.count === 0) return null;
+  const status =
+    state.status === 'error' || state.status === 'blocked'
+      ? state.error ?? 'áudio bloqueado'
+      : state.status === 'loading'
+        ? 'carregando…'
+        : state.playing
+          ? 'tocando'
+          : 'pausado';
   return (
     <div className="hud-miniplayer" data-mode={mode}>
       <button
         className="vu-btn vu-btn-icon"
         onClick={() => {
           const nextMode = mode === 'mine' ? 'game' : 'mine';
-          audioEngine.init();
           audioEngine.setMusicMode(nextMode);
-          if (nextMode === 'mine') customMusicPlayer.play();
           setMode(nextMode);
         }}
         title={mode === 'mine' ? 'Trocando para a trilha do jogo' : 'Trocando para suas músicas'}
@@ -475,26 +488,27 @@ const MiniPlayer: React.FC = () => {
       >
         {mode === 'mine' ? 'MP3' : 'TRILHA'}
       </button>
-      <button className="vu-btn vu-btn-icon" onClick={() => customMusicPlayer.previous()} title="Anterior">
+      <button className="vu-btn vu-btn-icon" onClick={() => audioEngine.customPrevious()} title="Anterior">
         <SkipBack size={15} />
       </button>
       <button
         className="vu-btn vu-btn-icon"
         style={{ background: '#ff9500', color: '#000', border: 'none' }}
-        onClick={() => customMusicPlayer.toggle()}
+        onClick={() => audioEngine.customToggle()}
         title={state.playing ? 'Pausar' : 'Tocar'}
       >
         {state.playing ? <Pause size={15} /> : <Play size={15} />}
       </button>
-      <button className="vu-btn vu-btn-icon" onClick={() => customMusicPlayer.next()} title="Próxima">
+      <button className="vu-btn vu-btn-icon" onClick={() => audioEngine.customNext()} title="Próxima">
         <SkipForward size={15} />
       </button>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 11, fontWeight: 800, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {state.trackName ?? 'Minhas Músicas'}
         </div>
-        <div style={{ fontSize: 9, color: '#94a3b8' }}>
-          {state.index + 1}/{state.count} • {state.playing ? 'tocando' : 'pausado'}
+        <div style={{ fontSize: 9, color: state.status === 'error' ? '#ef233c' : '#94a3b8' }}>
+          {state.index + 1}/{state.count} • {status}
+          {state.duration > 0 ? ` • ${Math.floor(state.currentTime / 60)}:${Math.floor(state.currentTime % 60).toString().padStart(2, '0')}` : ''}
         </div>
       </div>
       {state.volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}

@@ -1,0 +1,73 @@
+{
+  "generatedAt": "2026-11-11T00:18:55.494Z",
+  "files": [
+    {
+      "name": "asphalt_clean.jpg",
+      "bytes": 390856
+    },
+    {
+      "name": "asphalt_normal.png",
+      "bytes": 3249902
+    },
+    {
+      "name": "asphalt_roughness.png",
+      "bytes": 2027965
+    },
+    {
+      "name": "asphalt_ao.png",
+      "bytes": 2484871
+    },
+    {
+      "name": "asphalt_albedo.jpg",
+      "bytes": 422336
+    },
+    {
+      "name": "ground_detail.jpg",
+      "bytes": 414548
+    },
+    {
+      "name": "ground_normal.png",
+      "bytes": 3376638
+    },
+    {
+      "name": "bark_albedo.jpg",
+      "bytes": 625786
+    },
+    {
+      "name": "bark_normal.png",
+      "bytes": 2954764
+    },
+    {
+      "name": "sky_day.jpg",
+      "bytes": 267918
+    },
+    {
+      "name": "horizon_day.png",
+      "bytes": 1319947
+    },
+    {
+      "name": "car_probe.png",
+      "bytes": 1472825
+    },
+    {
+      "name": "sky_night.jpg",
+      "bytes": 219847
+    },
+    {
+      "name": "environment_day.jpg",
+      "bytes": 288014
+    },
+    {
+      "name": "environment_night.jpg",
+      "bytes": 243536
+    },
+    {
+      "name": "headlight.jpg",
+      "bytes": 38377
+    },
+    {
+      "name": "taillight.jpg",
+      "bytes": 37543
+    }
+  ]
+}

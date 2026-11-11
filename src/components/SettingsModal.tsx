@@ -1,5 +1,5 @@
 import React from 'react';
-import { Gauge, Monitor, SlidersHorizontal, Volume2, X } from 'lucide-react';
+import { Camera, Gauge, Monitor, SlidersHorizontal, Volume2, X } from 'lucide-react';
 
 export interface GameSettings {
   masterVolume: number; // 0..1 (mute handled separately)
@@ -14,12 +14,16 @@ export interface GameSettings {
   speedBlurEnabled: boolean;
   invertSteering: boolean;
   colorblindMode: 'none' | 'protanopia' | 'deuteranopia' | 'tritanopia';
+  /** A/B: real-photograph PBR maps vs the original 100% procedural look.
+   *  Optional so older saved settings (and test fixtures) keep compiling. */
+  photographicAssets?: boolean;
 }
 
 interface Props {
   settings: GameSettings;
   onChange: (next: GameSettings) => void;
   onClose: () => void;
+  onShowPhotoCredits?: () => void;
 }
 
 function SliderRow(props: {
@@ -72,7 +76,8 @@ function Section(props: { icon: React.ReactNode; title: string; children: React.
   );
 }
 
-export const SettingsModal: React.FC<Props> = ({ settings, onChange, onClose }) => {
+export const SettingsModal: React.FC<Props> = ({ settings, onChange, onClose, onShowPhotoCredits }) => {
+  const photoPass = settings.photographicAssets !== false;
   const set = (patch: Partial<GameSettings>) => onChange({ ...settings, ...patch });
   const pct = (v: number) => `${Math.round(v * 100)}%`;
 
@@ -129,6 +134,21 @@ export const SettingsModal: React.FC<Props> = ({ settings, onChange, onClose }) 
               <input type="checkbox" checked={settings.cameraShakeEnabled} onChange={(e) => set({ cameraShakeEnabled: e.target.checked })} />
               Vibração da câmera em alta velocidade
             </label>
+            <label className="vu-toggle">
+              <input
+                type="checkbox"
+                checked={photoPass}
+                onChange={(e) => set({ photographicAssets: e.target.checked })}
+              />
+              Texturas fotográficas reais (asfalto, grama, casca, nuvens, IBL, faróis)
+            </label>
+            <div className="vu-muted" style={{ fontSize: 11 }}>
+              Desmarque para comparar com o visual 100% procedural anterior — a troca é imediata, sem
+              reiniciar a corrida. Fotos licenciadas de domínio público / Unsplash / ESO CC BY 4.0.
+            </div>
+            <button className="vu-btn" style={{ alignSelf: 'flex-start' }} onClick={onShowPhotoCredits ?? (() => {})}>
+              <Camera size={14} /> Ver referências fotográficas e créditos
+            </button>
           </Section>
 
           <Section icon={<SlidersHorizontal size={14} />} title="Controles">
