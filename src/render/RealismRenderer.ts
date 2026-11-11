@@ -57,6 +57,11 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { BokehPass } from 'three/examples/jsm/postprocessing/BokehPass.js';
 import { WeatherPreset } from '../types/game';
+import {
+  getPhotographicAssets,
+  photographicAssetsEnabled,
+  photographicAssetsReady,
+} from './PhotographicAssets';
 
 export interface SkyInput {
   weather: WeatherPreset;
@@ -64,6 +69,14 @@ export interface SkyInput {
   sunDirection: THREE.Vector3;
   dayFactor: number;
   lightning: boolean;
+}
+
+/** Neutral 1×1 fallback so the photo samplers are always bound (no GL warnings
+ *  in the CPU/Vitest harness and on machines that block the asset fetch). */
+function neutralPhotoTexture(): THREE.DataTexture {
+  const t = new THREE.DataTexture(new Uint8Array([118, 142, 168, 255]), 1, 1, THREE.RGBAFormat);
+  t.needsUpdate = true;
+  return t;
 }
 
 const SKY_VERT = /* glsl */ `
@@ -99,6 +112,17 @@ const SKY_FRAG = /* glsl */ `
   uniform float uTime;
   uniform float uLightning;
   uniform float uHaze;
+
+  // --- Real-photograph sky (realism pass #3) -------------------------------
+  // The analytic model below is physically motivated but procedural: FBM
+  // clouds always look like FBM clouds. These samplers hold photographs of real
+  // daytime cumulus/altocumulus and the ESO 360° night panorama. We take their
+  // luminance *structure* (cloud shape, self-shadowing, star field) and let the
+  // weather system keep control of colour, so dawn, storm and dusk still work.
+  uniform sampler2D uPhotoSkyDay;
+  uniform sampler2D uPhotoSkyNight;
+  uniform sampler2D uPhotoHorizon;
+  uniform float uPhotoBlend;
 
   // Hash / value noise for clouds and stars.
   float hash(vec2 p) {
@@ -141,6 +165,33 @@ const SKY_FRAG = /* glsl */ `
     // long path near the horizon. This is what gives sunsets their ramp.
     vec3 extinction = vec3(0.72, 1.0, 1.28);
     base *= mix(vec3(1.0), extinction, clamp(rayleigh * 0.55, 0.0, 1.0));
+
+    // --- Photographic cloud structure --------------------------------------
+    if (uPhotoBlend > 0.001) {
+      float azimuth = atan(dir.z, dir.x) * 0.15915494 + 0.5;
+      // v=1 is the zenith (top of the photograph), v=0 the geometric horizon.
+      float elevation = clamp(asin(clamp(dir.y, 0.0, 1.0)) * 0.63661977, 0.0, 1.0);
+      vec3 dayPhoto = texture2D(uPhotoSkyDay, vec2(azimuth, elevation)).rgb;
+      vec3 nightPhoto = texture2D(uPhotoSkyNight, vec2(azimuth, elevation)).rgb;
+      vec3 photoSky = mix(nightPhoto, dayPhoto, uDayFactor);
+      float photoLum = dot(photoSky, vec3(0.2126, 0.7152, 0.0722));
+      // Deviation from the photograph's mean luminance = cloud/clear structure.
+      float structure = clamp((photoLum - 0.46) * 1.7, -0.55, 0.65);
+      float skyWeight = uPhotoBlend * clamp(dir.y * 4.0 + 0.12, 0.0, 1.0);
+      base *= 1.0 + structure * 0.68 * skyWeight;
+      // A little real chroma (warm cloud tops, blue gaps) without letting a
+      // fixed photograph override the physical time-of-day gradient.
+      base = mix(base, photoSky, skyWeight * 0.26 * uDayFactor);
+
+      // Distant photographed silhouette: guardrail, treeline, hazy hills. Only
+      // in a thin band around the geometric horizon, faded top and bottom so it
+      // reads as aerial perspective rather than a pasted strip.
+      float band = clamp((0.085 - abs(dir.y)) / 0.085, 0.0, 1.0);
+      vec2 hUv = vec2(azimuth, clamp((dir.y + 0.085) / 0.17, 0.0, 1.0));
+      vec4 horizonPhoto = texture2D(uPhotoHorizon, hUv);
+      float silhouette = (0.5 - dot(horizonPhoto.rgb, vec3(0.2126, 0.7152, 0.0722))) * 0.55;
+      base *= 1.0 - max(0.0, silhouette) * band * horizonPhoto.a * uPhotoBlend * 0.45 * uDayFactor;
+    }
 
     // --- Mie forward scatter (sun halo) ------------------------------------
     float cosTheta = max(0.0, dot(dir, uSunDir));
@@ -340,6 +391,11 @@ export class RealismRenderer {
 
   private contactTexture: THREE.CanvasTexture;
 
+  private neutralPhoto: THREE.DataTexture;
+  private photoEnvReady = false;
+  private photoEnvApplied = false;
+  private lastEnvMode = '';
+
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera) {
     this.renderer = renderer;
     this.scene = scene;
@@ -357,6 +413,7 @@ export class RealismRenderer {
     this.composer = new EffectComposer(renderer, rt);
     this.composer.setPixelRatio(renderer.getPixelRatio());
 
+    this.neutralPhoto = neutralPhotoTexture();
     this.skyMat = new THREE.ShaderMaterial({
       vertexShader: SKY_VERT,
       fragmentShader: SKY_FRAG,
@@ -375,6 +432,10 @@ export class RealismRenderer {
         uTime: { value: 0 },
         uLightning: { value: 0 },
         uHaze: { value: 0.5 },
+        uPhotoSkyDay: { value: this.neutralPhoto },
+        uPhotoSkyNight: { value: this.neutralPhoto },
+        uPhotoHorizon: { value: this.neutralPhoto },
+        uPhotoBlend: { value: 0 },
       },
     });
 
@@ -395,6 +456,20 @@ export class RealismRenderer {
 
     this.pmrem = new THREE.PMREMGenerator(renderer);
     this.pmrem.compileEquirectangularShader();
+
+    // --- Photographic sky + IBL -------------------------------------------
+    // Bind immediately (TextureLoader hands back the object before the bytes
+    // arrive); the shader blend stays at 0 until decoding finishes, so a slow
+    // connection can never show a half-black sky dome.
+    const photos = getPhotographicAssets();
+    if (photos) {
+      this.skyMat.uniforms.uPhotoSkyDay.value = photos.skyDay;
+      this.skyMat.uniforms.uPhotoSkyNight.value = photos.skyNight;
+      this.skyMat.uniforms.uPhotoHorizon.value = photos.horizonDay;
+    }
+    void photographicAssetsReady().then(() => {
+      this.photoEnvReady = !!photos;
+    });
 
     this.renderPass = new RenderPass(scene, camera);
     this.bloomPass = new UnrealBloomPass(
@@ -430,6 +505,11 @@ export class RealismRenderer {
 
   public get skyObject(): THREE.Object3D {
     return this.skyMesh;
+  }
+
+  /** True when the IBL is a real photograph rather than the analytic dome. */
+  public photographicEnvironmentActive(): boolean {
+    return this.photoEnvApplied;
   }
 
   /**
@@ -593,6 +673,11 @@ export class RealismRenderer {
       u.uHaze.value = Math.min(0.95, 0.35 + input.weather.visibilityFog * 18);
     }
 
+    // Real cloud photographs only outdoors (the garage has its own studio
+    // lighting), and only once every texture has decoded.
+    const photoSkyActive = photographicAssetsEnabled() && this.photoEnvReady && !this.skyOverride;
+    u.uPhotoBlend.value = photoSkyActive ? 1 : 0;
+
     // Match fog to the horizon so distant geometry dissolves into the sky
     // instead of into a different colour (a classic compositing tell).
     const fogColor = horizon.clone().lerp(zenith, 0.25);
@@ -618,17 +703,39 @@ export class RealismRenderer {
     // Throttled: PMREM costs ~1.5 ms and is only perceptible when the sun has
     // moved enough to change the specular lobe direction.
     const sunY = input.sunDirection.y;
+    const photos = getPhotographicAssets();
+    const photoEnvMode = photoSkyActive && photos
+      ? (day > 0.32 ? 'photo-day' : 'photo-night')
+      : 'analytic';
     const needsUpdate =
       Math.abs(sunY - this.lastEnvSunY) > 0.018 ||
       input.weather.id !== this.lastEnvWeather ||
-      this.clock - this.lastEnvTime > 4.0;
+      this.clock - this.lastEnvTime > 4.0 ||
+      this.lastEnvMode !== photoEnvMode;
     if (needsUpdate) {
       this.lastEnvSunY = sunY;
       this.lastEnvWeather = input.weather.id;
       this.lastEnvTime = this.clock;
-      if (this.envTarget) this.envTarget.dispose();
-      this.envTarget = this.pmrem.fromScene(this.skyScene, 0, 1, 200);
-      this.scene.environment = this.envTarget.texture;
+      this.lastEnvMode = photoEnvMode;
+      if (photoEnvMode === 'photo-day' || photoEnvMode === 'photo-night') {
+        // three.js converts an EquirectangularReflectionMapping texture to a
+        // PMREM cube internally. A real cloud/road/car panorama gives clearcoat
+        // paint, chrome and glass the irregular, non-repeating reflections that
+        // a procedural gradient can never produce.
+        if (this.envTarget) {
+          this.envTarget.dispose();
+          this.envTarget = null;
+        }
+        this.scene.environment = photoEnvMode === 'photo-day'
+          ? photos!.environmentDay
+          : photos!.environmentNight;
+        this.photoEnvApplied = true;
+      } else {
+        if (this.envTarget) this.envTarget.dispose();
+        this.envTarget = this.pmrem.fromScene(this.skyScene, 0, 1, 200);
+        this.scene.environment = this.envTarget.texture;
+        this.photoEnvApplied = false;
+      }
       this.scene.environmentIntensity = 0.55 + day * 0.65;
     }
 
@@ -787,5 +894,6 @@ export class RealismRenderer {
     this.pmrem.dispose();
     this.composer.dispose();
     this.skyMat.dispose();
+    this.neutralPhoto.dispose();
   }
 }

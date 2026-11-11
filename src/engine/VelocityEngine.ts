@@ -23,6 +23,10 @@ import { BOT_ROSTER } from '../data/botRoster';
 import { WEATHER_PRESETS } from '../data/weatherCatalog';
 import { audioEngine } from '../audio/VelocityAudioEngine';
 import { RealismRenderer } from '../render/RealismRenderer';
+import {
+  applyPhotographicMapsToScene,
+  setPhotographicAssetsEnabled as setPhotoAssetsEnabled,
+} from '../render/PhotographicAssets';
 import { buildRacingLine, RacingLine, RacingLineFollower } from '../ai/RacingLine';
 import { adjustBotSkill } from '../ai/difficulty';
 import { chaseBoom, computeChaseRoll, fitVerticalFov, speedFov } from './CameraRig';
@@ -81,6 +85,12 @@ export interface EngineCallbacks {
   onSheepDisqualification: () => void;
   /** Fired whenever the pause state changes (Esc/P, HUD button, auto-pause). */
   onPauseChanged?: (paused: boolean) => void;
+}
+
+/** Dev-only handle for the browser harness (see src/dev/runtimeDebug.ts). */
+let activeEngine: VelocityEngine | null = null;
+export function getActiveEngine(): VelocityEngine | null {
+  return activeEngine;
 }
 
 export class VelocityEngine {
@@ -283,6 +293,7 @@ export class VelocityEngine {
     );
 
     this.realism = new RealismRenderer(this.renderer, this.scene, this.camera);
+    if (import.meta.env.DEV && typeof window !== 'undefined') activeEngine = this;
 
     this.hemiLight = new THREE.HemisphereLight(0x90e0ef, 0x1e2430, 0.85);
     this.scene.add(this.hemiLight);
@@ -490,6 +501,17 @@ export class VelocityEngine {
 
   public setInvertSteering(invert: boolean): void {
     this.invertSteering = invert;
+  }
+
+  /**
+   * Live A/B between the 100% procedural look and the photographic pass.
+   * Materials carry both map sets in `userData`, so this swaps them without
+   * rebuilding the track, the forest or the car rig. The sky shader and the
+   * PMREM environment read the same global flag on the next `updateSky()`.
+   */
+  public setPhotographicAssetsEnabled(enabled: boolean): void {
+    setPhotoAssetsEnabled(enabled);
+    applyPhotographicMapsToScene(this.scene, enabled);
   }
 
   public isPausedNow(): boolean {
@@ -953,7 +975,11 @@ export class VelocityEngine {
       roadMat.clearcoat += (targetClearcoat - roadMat.clearcoat) * Math.min(1, dt * 0.6);
       roadMat.roughness += (targetRough - roadMat.roughness) * Math.min(1, dt * 0.6);
       roadMat.clearcoatRoughness = 0.5 - wet * 0.42;
-      roadMat.envMapIntensity = 1.0 + wet * 0.9;
+      // Photographic asphalt is dark bitumen: the real-sky IBL must be damped
+      // or the whole strip turns silver under a bright PMREM. Wet roads are
+      // allowed to climb back toward a mirror, as real water films do.
+      const photoAsphalt = roadMat.userData.photographic === true;
+      roadMat.envMapIntensity = (photoAsphalt ? 0.62 : 1.0) + wet * (photoAsphalt ? 0.55 : 0.9);
     }
 
     this.sunLight.intensity = lightningFlash ? 6.5 : 0.16 + dayFactor * 3.0;
@@ -1124,15 +1150,19 @@ export class VelocityEngine {
    * pause and comes back on resume.
    */
   public setPaused(paused: boolean): void {
-    if (this.userPaused === paused) return;
+    const changed = this.userPaused !== paused;
     this.userPaused = paused;
     if (paused) {
       this.touchControls = { throttle: 0, brake: 0, steer: 0, nitro: false, handbrake: false };
       audioEngine.pauseForMenu();
     } else {
+      // Not guarded by `changed`: enterGarage()/startRace() force userPaused to
+      // false directly, so the audio engine can be left muted with the flag
+      // already false. resumeFromMenu() is idempotent and always restores the
+      // master bus. This is the fix for a silent race after a paused session.
       audioEngine.resumeFromMenu();
     }
-    this.callbacks.onPauseChanged?.(paused);
+    if (changed) this.callbacks.onPauseChanged?.(paused);
   }
 
   public isPaused(): boolean {
@@ -2378,6 +2408,7 @@ export class VelocityEngine {
   }
 
   public dispose(): void {
+    if (activeEngine === this) activeEngine = null;
     if (this.animFrameId !== null) cancelAnimationFrame(this.animFrameId);
     window.removeEventListener('resize', this.handleResize);
     window.removeEventListener('orientationchange', this.handleResize);

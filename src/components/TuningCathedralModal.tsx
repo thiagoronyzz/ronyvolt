@@ -30,6 +30,7 @@ export const TuningCathedralModal: React.FC<Props> = ({
   onClose,
 }) => {
   const [tab, setTab] = useState<'motor' | 'transmissao' | 'susp_aero' | 'visual_rodas' | 'som_placa'>('motor');
+  const [mp3Status, setMp3Status] = useState<string | null>(null);
   const stats = computeEffectiveCarStats(car, tune);
 
   const update = <K extends keyof CarTuneSetup>(key: K, val: CarTuneSetup[K]) => {
@@ -647,10 +648,19 @@ export const TuningCathedralModal: React.FC<Props> = ({
                   accept="audio/*"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
-                    if (file) audioEngine.loadCustomMusicFile(file);
+                    if (!file) return;
+                    setMp3Status('Importando e tocando…');
+                    void audioEngine
+                      .loadCustomMusicFile(file)
+                      .then(() => setMp3Status(`${file.name} adicionada à playlist e tocando.`))
+                      .catch((err: unknown) =>
+                        setMp3Status(`Não foi possível importar: ${err instanceof Error ? err.message : String(err)}`)
+                      );
+                    e.target.value = '';
                   }}
                   style={{ ...inputStyle, padding: 4 }}
                 />
+                {mp3Status && <span style={{ fontSize: 11, color: '#ffb347' }}>{mp3Status}</span>}
               </label>
             </div>
 

@@ -8,6 +8,9 @@ import '@fontsource/archivo/800.css';
 import '@fontsource/archivo/900.css';
 import './ui/game.css';
 import { App } from './App';
+import { installRuntimeDebug } from './dev/runtimeDebug';
+
+installRuntimeDebug();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

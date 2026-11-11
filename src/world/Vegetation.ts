@@ -31,6 +31,12 @@
 import * as THREE from 'three';
 import { BiomePalette } from './Scenery';
 import { foliageCardTexture, barkMaps } from './proceduralTextures';
+import {
+  clonePhoto,
+  getPhotographicAssetLibrary,
+  photographicAssetsEnabled,
+  tagPhotographicMaterial,
+} from '../render/PhotographicAssets';
 import { seededRandom, fbm2 } from './noise';
 
 export interface TreeScatterOptions {
@@ -75,14 +81,26 @@ function buildTreeLOD0(recipe: SpeciesRecipe, foliageHex: string, seed: number):
   const rng = seededRandom(seed);
   const g = new THREE.Group();
   const barkM = barkMaps();
+  const photos = getPhotographicAssetLibrary();
+  const usePhotos = !!photos && photographicAssetsEnabled();
+  const photoBark = photos ? clonePhoto(photos.barkAlbedo, 1, 1) : barkM.albedo;
+  const photoBarkNormal = photos ? clonePhoto(photos.barkNormal, 1, 1) : barkM.normalMap;
   const bark = new THREE.MeshStandardMaterial({
     color: 0x4b3f31,
     roughness: 0.94,
     metalness: 0,
-    map: barkM.albedo,
-    normalMap: barkM.normalMap,
+    map: usePhotos ? photoBark : barkM.albedo,
+    normalMap: usePhotos ? photoBarkNormal : barkM.normalMap,
     roughnessMap: barkM.roughnessMap,
   });
+  bark.userData.photographic = usePhotos;
+  if (photos) {
+    tagPhotographicMaterial(
+      bark,
+      { map: photoBark, normalMap: photoBarkNormal },
+      { map: barkM.albedo, normalMap: barkM.normalMap }
+    );
+  }
 
   // Trunk: a tapered, slightly bent 8-sided tube.
   const trunkGeo = new THREE.CylinderGeometry(recipe.trunkR * 0.55, recipe.trunkR, recipe.trunkH, 8, 3);

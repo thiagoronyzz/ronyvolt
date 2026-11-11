@@ -55,7 +55,10 @@ import {
   RaceHud,
 } from './components/RaceHudAndPhotoMode';
 import { audioEngine, RADIO_STATIONS } from './audio/VelocityAudioEngine';
+import { customMusicMedia } from './audio/CustomMusicMedia';
 import { GameSettings, SettingsModal } from './components/SettingsModal';
+import { PhotoCreditsModal } from './components/PhotoCreditsModal';
+import { setPhotographicAssetsEnabled } from './render/PhotographicAssets';
 import { PauseMenu } from './components/PauseMenu';
 import { ScreenVeil } from './components/ScreenVeil';
 
@@ -76,6 +79,7 @@ const DEFAULT_SETTINGS: GameSettings = {
   speedBlurEnabled: true,
   invertSteering: false,
   colorblindMode: 'none',
+  photographicAssets: true,
 };
 
 function loadSettings(): GameSettings {
@@ -186,6 +190,7 @@ export const App: React.FC = () => {
     NonNullable<typeof engineRef.current>['getMinimapData']
   >>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showPhotoCredits, setShowPhotoCredits] = useState(false);
   const [settings, setSettings] = useState<GameSettings>(loadSettings);
 
   // Photo Mode Studio
@@ -257,6 +262,9 @@ export const App: React.FC = () => {
   // One listener, removed immediately, so the MP3 player and the engine come
   // alive on the first click/tap instead of staying silent.
   useEffect(() => {
+    // Restore the imported MP3 queue on startup. Without this the HUD's
+    // mini-player only worked if the player had opened the music modal first.
+    void customMusicMedia.refresh().catch(() => {});
     const unlock = () => {
       audioEngine.unlock();
       audioEngine.retryPendingCustomPlayback();
@@ -283,6 +291,11 @@ export const App: React.FC = () => {
     audioEngine.setSfxVolume(settings.sfxVolume);
     audioEngine.setMusicVolume(settings.musicVolume);
     audioEngine.setCustomVolume(settings.customVolume);
+    // Photographic PBR pass: apply the global flag even when no engine exists
+    // yet, then swap the maps of the live scene in one traversal.
+    const photoPass = settings.photographicAssets !== false;
+    setPhotographicAssetsEnabled(photoPass);
+    engineRef.current?.setPhotographicAssetsEnabled(photoPass);
     setMuted(settings.muted);
     setColorblindMode(settings.colorblindMode);
     const engine = engineRef.current;
@@ -700,8 +713,15 @@ export const App: React.FC = () => {
 
       {/* Settings */}
       {showSettings && (
-        <SettingsModal settings={settings} onChange={setSettings} onClose={() => setShowSettings(false)} />
+        <SettingsModal
+          settings={settings}
+          onChange={setSettings}
+          onClose={() => setShowSettings(false)}
+          onShowPhotoCredits={() => setShowPhotoCredits(true)}
+        />
       )}
+
+      {showPhotoCredits && <PhotoCreditsModal onClose={() => setShowPhotoCredits(false)} />}
 
       {inRace && showTelemetry && telemetryFrame && !photoMode && (
         <TelemetryOverlay

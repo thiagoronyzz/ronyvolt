@@ -39,6 +39,12 @@ export function applyLeafGlow(shader: Parameters<THREE.Material['onBeforeCompile
 import { BiomeTheme } from '../types/game';
 import { fbm2, hash2, seededRandom, valueNoise2 } from './noise';
 import { barkMaps, concreteMaps, foliageCardTexture, grassCardTexture, groundDetailMaps } from './proceduralTextures';
+import {
+  clonePhoto,
+  getPhotographicAssetLibrary,
+  photographicAssetsEnabled,
+  tagPhotographicMaterial,
+} from '../render/PhotographicAssets';
 
 const up = new THREE.Vector3(0, 1, 0);
 
@@ -239,16 +245,31 @@ export function buildTree(
   const group = new THREE.Group();
 
   const bark = barkMaps();
+  // Real bark photograph: vertical plates, deep fissures and lichen are kept as
+  // measured luminance relief rather than ridged-noise approximations. The photo
+  // is near-greyscale so `color`/vertex colours still decide the species hue.
+  const photos = getPhotographicAssetLibrary();
+  const usePhotos = !!photos && photographicAssetsEnabled();
+  const barkAlbedo = photos ? clonePhoto(photos.barkAlbedo, 1, 1) : bark.albedo;
+  const barkNormal = photos ? clonePhoto(photos.barkNormal, 1, 1) : bark.normalMap;
   const trunkMat = new THREE.MeshStandardMaterial({
     color: new THREE.Color(palette.treeTrunk),
-    map: bark.albedo,
-    normalMap: bark.normalMap,
-    normalScale: new THREE.Vector2(1.1, 1.1),
+    map: usePhotos ? barkAlbedo : bark.albedo,
+    normalMap: usePhotos ? barkNormal : bark.normalMap,
+    normalScale: new THREE.Vector2(usePhotos ? 1.45 : 1.1, usePhotos ? 1.45 : 1.1),
     roughnessMap: bark.roughnessMap,
     roughness: 0.94,
     metalness: 0,
     vertexColors: true,
   });
+  trunkMat.userData.photographic = usePhotos;
+  if (photos) {
+    tagPhotographicMaterial(
+      trunkMat,
+      { map: barkAlbedo, normalMap: barkNormal },
+      { map: bark.albedo, normalMap: bark.normalMap }
+    );
+  }
 
   // ---- Branches -----------------------------------------------------------
   const skeleton = buildBranchSkeleton(species, rng);
@@ -748,15 +769,27 @@ export function buildTerrain(
   geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
   const detailMaps = groundDetailMaps(palette.grass);
+  const photos = getPhotographicAssetLibrary();
+  const usePhotos = !!photos && photographicAssetsEnabled();
+  const photoGround = photos ? clonePhoto(photos.groundDetail, 1, 1) : detailMaps.albedo;
+  const photoGroundNormal = photos ? clonePhoto(photos.groundNormal, 1, 1) : detailMaps.normalMap;
   const mat = new THREE.MeshStandardMaterial({
     vertexColors: true,
-    map: detailMaps.albedo,
-    normalMap: detailMaps.normalMap,
+    map: usePhotos ? photoGround : detailMaps.albedo,
+    normalMap: usePhotos ? photoGroundNormal : detailMaps.normalMap,
     normalScale: new THREE.Vector2(0.6, 0.6),
     roughnessMap: detailMaps.roughnessMap,
     roughness: 0.94,
     metalness: 0,
   });
+  mat.userData.photographic = usePhotos;
+  if (photos) {
+    tagPhotographicMaterial(
+      mat,
+      { map: photoGround, normalMap: photoGroundNormal },
+      { map: detailMaps.albedo, normalMap: detailMaps.normalMap }
+    );
+  }
   // UVs need to tile: one tile per 6 m of terrain.
   const uv = geo.attributes.uv as THREE.BufferAttribute;
   for (let i = 0; i < uv.count; i++) {

@@ -5,3 +5,9 @@ dist
 *.local
 coverage
 *.tsbuildinfo
+
+# Scratch reference photography and crop probes used during the realism audit.
+# The runtime/build inputs live in public/assets/photos/{source,generated}.
+image-search/
+tmp-crops/
+docs/preview/diag/

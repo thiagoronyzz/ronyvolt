@@ -28,6 +28,12 @@ import {
   tireMaps,
   windGlassMaps,
 } from '../world/proceduralTextures';
+import {
+  clonePhoto,
+  getPhotographicAssetLibrary,
+  photographicAssetsEnabled,
+  tagPhotographicMaterial,
+} from '../render/PhotographicAssets';
 
 export interface BuiltCarRig {
   root: THREE.Group;
@@ -1225,14 +1231,30 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
     map: headlightLensTexture(),
     envMapIntensity: 1.6,
   });
+  // Behind the glass: a photograph of an actual GT-R projector housing with
+  // its cyan lens and LED DRL, instead of a hand-painted radial hotspot. The
+  // lens above still refracts it, so the lamp keeps real depth.
+  const photos = getPhotographicAssetLibrary();
+  const usePhotos = !!photos && photographicAssetsEnabled();
+  const photoHeadlight = photos ? clonePhoto(photos.headlight, 1, 1) : null;
+  const useHeadlight = usePhotos ? photoHeadlight : null;
   const reflectorMat = new THREE.MeshStandardMaterial({
-    color: 0xdfe6ee,
-    metalness: 1,
-    roughness: 0.12,
-    emissive: new THREE.Color(hlColor),
-    emissiveIntensity: 0.35,
+    color: useHeadlight ? 0xf4f8ff : 0xdfe6ee,
+    metalness: useHeadlight ? 0.55 : 1,
+    roughness: useHeadlight ? 0.22 : 0.12,
+    map: useHeadlight,
+    emissive: new THREE.Color(useHeadlight ? 0x9fd8ff : hlColor),
+    emissiveMap: useHeadlight,
+    emissiveIntensity: useHeadlight ? 0.62 : 0.35,
     side: THREE.DoubleSide,
   });
+  if (photoHeadlight) {
+    tagPhotographicMaterial(
+      reflectorMat,
+      { map: photoHeadlight, emissiveMap: photoHeadlight },
+      { map: null, emissiveMap: null }
+    );
+  }
 
   for (const side of [-1, 1]) {
     const y = shape.floor + shape.hoodY * 0.42;
@@ -1264,17 +1286,30 @@ export function buildCarMesh(car: CarSpec, tune: CarTuneSetup): BuiltCarRig {
   // at the tail, the planes floated in mid-air as two black bricks. They are now
   // placed on the real tail surface and sized from the real tail width.
   const tailTex = taillightTexture();
+  // Real BMW LED light guide: the amber turn segment, the white reverse strip
+  // and the red guide all have irregular edges and internal reflections. A
+  // procedural Gaussian stripe cannot reproduce that signature.
+  const photoTail = photos ? clonePhoto(photos.taillight, 1, 1) : null;
+  const useTail = usePhotos ? photoTail : null;
+  const tailMap = useTail ?? tailTex;
   const tailMat = new THREE.MeshStandardMaterial({
-    color: 0xff2a3c,
-    map: tailTex,
-    emissive: new THREE.Color(0xff1a2a),
-    emissiveMap: tailTex,
-    emissiveIntensity: 0.55,
+    color: useTail ? 0xffffff : 0xff2a3c,
+    map: tailMap,
+    emissive: new THREE.Color(useTail ? 0xff5544 : 0xff1a2a),
+    emissiveMap: tailMap,
+    emissiveIntensity: useTail ? 0.5 : 0.55,
     roughness: 0.18,
     metalness: 0.1,
     transparent: true,
     opacity: 0.95,
   });
+  if (photoTail) {
+    tagPhotographicMaterial(
+      tailMat,
+      { map: photoTail, emissiveMap: photoTail },
+      { map: tailTex, emissiveMap: tailTex }
+    );
+  }
   const brakeMat = new THREE.MeshStandardMaterial({ color: 0x1a0407, roughness: 0.4 });
   const tailZ = -shape.length * 0.5 + 0.055;
   // Real width of the tail at lamp height, and how far back the surface sits.

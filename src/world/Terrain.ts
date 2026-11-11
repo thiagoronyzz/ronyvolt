@@ -42,6 +42,12 @@ import * as THREE from 'three';
 import { BiomeTheme } from '../types/game';
 import { fbm2, hash2, seededRandom } from './noise';
 import { groundDetailMaps, terrainRockMaps } from './proceduralTextures';
+import {
+  clonePhoto,
+  getPhotographicAssetLibrary,
+  photographicAssetsEnabled,
+  tagPhotographicMaterial,
+} from '../render/PhotographicAssets';
 
 export interface TerrainShape {
   /** Amplitude of the macro landform, metres. */
@@ -362,16 +368,37 @@ export function buildTerrainV2(
 
     const detailMaps = groundDetailMaps(shape.grassHex);
     const rockMaps = terrainRockMaps();
+    // Photographic pass: a real turf close-up replaces the noise albedo. It is
+    // deliberately near-greyscale so the biome's vertex-coloured geology still
+    // controls hue (Amazon green, Sahara ochre, Mars rust). Its Sobel normal
+    // carries the actual blade/clump relief on the near plate; the distant
+    // shell keeps the procedural rock normal because at 1–4 km fracture lines
+    // matter more than individual blades.
+    const photos = getPhotographicAssetLibrary();
+    const isNearPlate = cellDetail >= 1;
+    const photoMap = photos ? clonePhoto(photos.groundDetail, 1, 1) : detailMaps.albedo;
+    const photoNormal = photos && isNearPlate ? clonePhoto(photos.groundNormal, 1, 1) : rockMaps.normalMap;
+    const usePhotos = !!photos && photographicAssetsEnabled();
+    const groundMap = usePhotos ? photoMap : detailMaps.albedo;
+    const groundNormal = usePhotos ? photoNormal : rockMaps.normalMap;
     const mat = new THREE.MeshStandardMaterial({
       vertexColors: true,
-      map: detailMaps.albedo,
-      normalMap: rockMaps.normalMap,
-      normalScale: new THREE.Vector2(0.35, 0.35),
+      map: groundMap,
+      normalMap: groundNormal,
+      normalScale: new THREE.Vector2(usePhotos && isNearPlate ? 0.5 : 0.35, usePhotos && isNearPlate ? 0.5 : 0.35),
       roughnessMap: rockMaps.roughnessMap,
       roughness: 0.96,
       metalness: 0.0,
       envMapIntensity: 0.55,
     });
+    mat.userData.photographic = usePhotos;
+    if (photos) {
+      tagPhotographicMaterial(
+        mat,
+        { map: photoMap, normalMap: photoNormal },
+        { map: detailMaps.albedo, normalMap: rockMaps.normalMap }
+      );
+    }
     const mesh = new THREE.Mesh(geo, mat);
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;

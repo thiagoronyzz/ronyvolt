@@ -1,5 +1,11 @@
 import * as THREE from 'three';
 import { BiomeTheme, CustomTrackData, GameMode, SavedPoster, TrackSpec } from '../types/game';
+import {
+  clonePhoto,
+  getPhotographicAssetLibrary,
+  photographicAssetsEnabled,
+  tagPhotographicMaterial,
+} from '../render/PhotographicAssets';
 import { buildTerrainV2, terrainShapeFor } from '../world/Terrain';
 import { buildForest } from '../world/Vegetation';
 import {
@@ -480,6 +486,9 @@ export function buildTrackWorld(
   const roadGeo = new THREE.BufferGeometry();
   roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(roadPositions, 3));
   roadGeo.setAttribute('uv', new THREE.Float32BufferAttribute(roadUvs, 2));
+  // aoMap samples channel 1 (`uv1`) in three.js r152+. Same metric UVs, but
+  // this lets the real-photograph ambient occlusion tile at its own scale.
+  roadGeo.setAttribute('uv1', new THREE.Float32BufferAttribute(roadUvs, 2));
   roadGeo.setIndex(roadIndices);
   roadGeo.computeVertexNormals();
 
@@ -487,21 +496,81 @@ export function buildTrackWorld(
   baseRoadTex.wrapT = THREE.RepeatWrapping;
   baseRoadTex.wrapS = THREE.ClampToEdgeWrapping;
   baseRoadTex.anisotropy = 8;
+  // BUG FIX (long-standing vertical streaking on every road):
+  // createRoadSurfaceTexture() set repeat=(1,75) for the OLD UV scheme where v
+  // ran 0..1 across the entire lap. The mesh now uses METRIC UVs
+  // (v = distance / roadWidth), so 75 repeats became 75 tiles per ~12 m —
+  // 16 cm per tile. The painted dashes and aggregate were minified into long
+  // moiré streaks toward the horizon. One tile per road width is the correct
+  // physical scale and matches every other road map.
+  baseRoadTex.repeat.set(1, 1);
   const detail = createAsphaltDetailMaps();
   const glossyFloor = track.biome === 'neo_tokyo' || track.biome === 'rc_bathroom';
+
+  // ── PHOTOGRAPHIC ASPHALT (realism pass #3) ──────────────────────────────
+  // A photo of real aggregate carries spatial frequencies noise cannot fake:
+  // crushed stone edges, binder pools, patch seams, paint worn into the grain.
+  // Derived maps (Sobel normals, local-variance roughness, cavity AO) make it
+  // react to the sun and headlights instead of looking like a printed decal.
+  // Exotic biomes keep their procedural identity (tiles, sand, regolith).
+  const photoBiome = ![
+    'rc_kitchen', 'rc_bathroom', 'amazon_jungle', 'sahara_desert',
+    'mars_colony', 'cloud_kingdom',
+  ].includes(track.biome);
+  const photos = photoBiome ? getPhotographicAssetLibrary() : null;
+  const usePhotos = !!photos && !glossyFloor && photographicAssetsEnabled();
+  let photoRoadMap: THREE.Texture | null = null;
+  let photoRoadNormal: THREE.Texture | null = null;
+  let photoRoadRoughness: THREE.Texture | null = null;
+  let photoRoadAo: THREE.Texture | null = null;
+  if (photos && !glossyFloor) {
+    // u spans exactly one road width. The albedo photo already contains the
+    // worn edge lines, amber dashes and twin rubber grooves at that scale.
+    photoRoadMap = clonePhoto(photos.asphaltAlbedo, 1, 1);
+    // All four maps share ONE UV transform: the normal, roughness and AO were
+    // derived from this exact photograph, so their relief must line up with the
+    // visible aggregate. One 1024² tile per road width is ~1.2 cm/texel on a
+    // 12 m road — the physical scale of real aggregate, and coarse enough not
+    // to alias into streaks at grazing angles.
+    photoRoadNormal = clonePhoto(photos.asphaltNormal, 1, 1);
+    photoRoadRoughness = clonePhoto(photos.asphaltRoughness, 1, 1);
+    photoRoadAo = clonePhoto(photos.asphaltAo, 1, 1, 1);
+  }
+  const photographicRoad = usePhotos;
+  let roadMap: THREE.Texture = usePhotos && photoRoadMap ? photoRoadMap : baseRoadTex;
+  let roadNormal: THREE.Texture | null = glossyFloor ? null : usePhotos ? photoRoadNormal : detail.normalMap;
+  let roadRoughness: THREE.Texture | null = glossyFloor ? null : usePhotos ? photoRoadRoughness : detail.roughnessMap;
+  let roadAo: THREE.Texture | null = usePhotos ? photoRoadAo : null;
+  let roadNormalScale = new THREE.Vector2(usePhotos ? 0.32 : 0.55, usePhotos ? 0.32 : 0.55);
   const roadMat = new THREE.MeshPhysicalMaterial({
-    map: baseRoadTex,
-    normalMap: glossyFloor ? null : detail.normalMap,
-    normalScale: new THREE.Vector2(0.55, 0.55),
-    roughnessMap: glossyFloor ? null : detail.roughnessMap,
-    roughness: glossyFloor ? 0.22 : 0.78,
+    map: roadMap,
+    normalMap: roadNormal,
+    normalScale: roadNormalScale,
+    roughnessMap: roadRoughness,
+    roughness: glossyFloor ? 0.22 : photographicRoad ? 0.9 : 0.78,
+    // Note: when the player A/B-toggles the photo pass at runtime only the
+    // maps are swapped (see applyPhotographicMaps); roughness stays at the
+    // photo value because it is a scalar, not a texture, and 0.9 still reads
+    // correctly with the procedural roughnessMap (which is mostly ~0.72).
+    aoMap: roadAo,
+    aoMapIntensity: roadAo ? 0.62 : 1,
     metalness: track.biome === 'neo_tokyo' ? 0.35 : 0.02,
     // Wet asphalt is a water film over a rough substrate — which is exactly what
     // clearcoat models. Dry, it stays subtle so the aggregate still reads.
     clearcoat: glossyFloor ? 0.8 : 0.08,
     clearcoatRoughness: glossyFloor ? 0.06 : 0.5,
-    envMapIntensity: 1.0,
+    // The photographic IBL is a real bright sky; at unity it lifts dark
+    // bitumen toward silver. Damp the specular environment on photo asphalt.
+    envMapIntensity: photographicRoad ? 0.62 : 1.0,
   });
+  roadMat.userData.photographic = photographicRoad;
+  if (photoRoadMap && photoRoadNormal && photoRoadRoughness) {
+    tagPhotographicMaterial(
+      roadMat,
+      { map: photoRoadMap, normalMap: photoRoadNormal, roughnessMap: photoRoadRoughness, aoMap: photoRoadAo },
+      { map: baseRoadTex, normalMap: detail.normalMap, roughnessMap: detail.roughnessMap, aoMap: null }
+    );
+  }
   const roadMesh = new THREE.Mesh(roadGeo, roadMat);
   roadMesh.receiveShadow = true;
   group.add(roadMesh);

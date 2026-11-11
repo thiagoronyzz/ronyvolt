@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ListMusic, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Trash2, Upload } from 'lucide-react';
-import { customMusicLibrary, CustomTrackMeta, PlayMode } from '../audio/CustomMusicLibrary';
+import { ListMusic, Pause, Play, Repeat1, Shuffle, SkipBack, SkipForward, Trash2, Upload } from 'lucide-react';
+import { PlayMode } from '../audio/CustomMusicLibrary';
+import { customMusicMedia, CustomTrackView } from '../audio/CustomMusicMedia';
 import { customMusicPlayer, CustomPlayerState } from '../audio/CustomMusicPlayer';
 import { audioEngine } from '../audio/VelocityAudioEngine';
 
@@ -11,7 +12,7 @@ function formatSize(bytes: number): string {
 }
 
 function formatDuration(sec: number | null): string {
-  if (sec === null || !Number.isFinite(sec)) return '--:--';
+  if (sec === null || !Number.isFinite(sec) || sec < 0) return '--:--';
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
@@ -19,62 +20,50 @@ function formatDuration(sec: number | null): string {
 
 const AUDIO_ACCEPT = 'audio/*,.mp3,.m4a,.aac,.ogg,.oga,.wav,.flac,.opus,.webm';
 
+const STATUS_LABEL: Record<CustomPlayerState['status'], string> = {
+  idle: 'pronto',
+  loading: 'carregando…',
+  playing: 'tocando',
+  paused: 'pausado',
+  blocked: 'bloqueado pelo navegador',
+  error: 'erro',
+};
+
 /**
  * "Minhas Músicas" — player-imported MP3s stored on the device (IndexedDB),
  * played as a queue inside the car. Works on PC and mobile: file picker,
  * drag & drop on desktop, touch-friendly rows.
+ *
+ * IMPORTANT: this component does NOT own the blob URLs anymore. They live in
+ * `customMusicMedia`, so closing this tab / modal / starting a race cannot
+ * revoke the URL that is currently playing. See CustomMusicMedia.ts.
  */
 export const CustomMusicPanel: React.FC = () => {
-  const [tracks, setTracks] = useState<CustomTrackMeta[]>([]);
-  const [urls, setUrls] = useState<Record<string, string>>({});
+  const [tracks, setTracks] = useState<CustomTrackView[]>(() => customMusicMedia.getViews());
   const [durations, setDurations] = useState<Record<string, number | null>>({});
   const [player, setPlayer] = useState<CustomPlayerState>(() => customMusicPlayer.getState());
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const urlsRef = useRef<Record<string, string>>({});
-
-  const refresh = useCallback(async () => {
-    const list = await customMusicLibrary.list();
-    setTracks(list);
-    const next: Record<string, string> = {};
-    for (const t of list) {
-      const existing = urlsRef.current[t.id];
-      if (existing) {
-        next[t.id] = existing;
-      } else {
-        const blob = await customMusicLibrary.getBlob(t.id);
-        if (blob) next[t.id] = URL.createObjectURL(blob);
-      }
-    }
-    // Revoke URLs of removed tracks.
-    for (const [id, url] of Object.entries(urlsRef.current)) {
-      if (!next[id]) URL.revokeObjectURL(url);
-    }
-    urlsRef.current = next;
-    setUrls(next);
-    customMusicPlayer.setTracks(
-      list.filter((t) => next[t.id]).map((t) => ({ id: t.id, name: t.name, url: next[t.id] }))
-    );
-  }, []);
 
   useEffect(() => {
-    refresh();
-    const unsub = customMusicPlayer.subscribe(setPlayer);
+    // No URL cleanup here on purpose: the queue must survive unmount.
+    const unsubMedia = customMusicMedia.subscribe(setTracks);
+    const unsubPlayer = customMusicPlayer.subscribe(setPlayer);
+    void customMusicMedia.refresh();
     return () => {
-      unsub();
-      for (const url of Object.values(urlsRef.current)) URL.revokeObjectURL(url);
-      urlsRef.current = {};
+      unsubMedia();
+      unsubPlayer();
     };
-  }, [refresh]);
+  }, []);
 
   // Probe durations lazily (metadata only, no playback).
   useEffect(() => {
     for (const t of tracks) {
-      if (durations[t.id] !== undefined || !urls[t.id]) continue;
+      if (!t.url || durations[t.id] !== undefined) continue;
       const probe = new Audio();
       probe.preload = 'metadata';
-      probe.src = urls[t.id];
+      probe.src = t.url;
       probe.addEventListener('loadedmetadata', () => {
         setDurations((d) => ({ ...d, [t.id]: probe.duration }));
       });
@@ -83,38 +72,36 @@ export const CustomMusicPanel: React.FC = () => {
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tracks, urls]);
+  }, [tracks]);
 
-  const addFiles = useCallback(
-    async (files: FileList | File[]) => {
-      const arr = [...files].filter((f) => f.type.startsWith('audio/') || /\.(mp3|m4a|aac|ogg|wav|flac|opus|webm)$/i.test(f.name));
-      if (arr.length === 0) {
-        setError('Nenhum arquivo de áudio válido encontrado. Use MP3, M4A, OGG, WAV ou FLAC.');
-        return;
-      }
-      setError(null);
-      audioEngine.init();
-      for (const f of arr) {
-        await customMusicLibrary.add(f);
-      }
-      await refresh();
-    },
-    [refresh]
-  );
-
-  const removeTrack = useCallback(
-    async (id: string) => {
-      await customMusicLibrary.remove(id);
-      await refresh();
-    },
-    [refresh]
-  );
-
-  const playTrack = useCallback((index: number) => {
+  const addFiles = useCallback(async (files: FileList | File[]) => {
+    const arr = [...files].filter((f) => f.type.startsWith('audio/') || /\.(mp3|m4a|aac|ogg|wav|flac|opus|webm)$/i.test(f.name));
+    if (arr.length === 0) {
+      setError('Nenhum arquivo de áudio válido encontrado. Use MP3, M4A, OGG, WAV ou FLAC.');
+      return;
+    }
+    setError(null);
     audioEngine.init();
-    audioEngine.setStation('custom_usb');
-    customMusicPlayer.play(index);
+    await customMusicMedia.addFiles(arr);
   }, []);
+
+  const removeTrack = useCallback(async (id: string) => {
+    await customMusicMedia.remove(id);
+  }, []);
+
+  /** Index inside the player queue (which excludes tracks without a blob). */
+  const queueIndexOf = useCallback((id: string) => {
+    return tracks.filter((t) => t.url).findIndex((t) => t.id === id);
+  }, [tracks]);
+
+  const playTrack = useCallback((view: CustomTrackView) => {
+    const index = queueIndexOf(view.id);
+    if (index < 0) {
+      setError('O arquivo desta faixa não pôde ser lido. Importe novamente.');
+      return;
+    }
+    audioEngine.playCustom(index);
+  }, [queueIndexOf]);
 
   const modeBtn = (mode: PlayMode, icon: React.ReactNode, label: string) => (
     <button
@@ -131,7 +118,10 @@ export const CustomMusicPanel: React.FC = () => {
     </button>
   );
 
-  const nowPlaying = player.index >= 0 ? tracks[player.index] : null;
+  const playable = tracks.filter((t) => t.url).length;
+  const nowPlaying = tracks.find((t) => t.id === player.trackId) ?? null;
+  const duration = player.duration || (nowPlaying ? durations[nowPlaying.id] ?? null : null);
+  const progress = duration && duration > 0 ? Math.min(1, player.currentTime / duration) : 0;
 
   return (
     <div>
@@ -159,7 +149,8 @@ export const CustomMusicPanel: React.FC = () => {
         <Upload size={22} style={{ color: '#ff9500', marginBottom: 6 }} />
         <div style={{ fontSize: 13, fontWeight: 800 }}>Arraste seus MP3 aqui</div>
         <div className="vu-muted" style={{ margin: '4px 0 10px' }}>
-          ou toque no botão abaixo — os arquivos ficam salvos neste dispositivo e tocam em sequência dentro do carro.
+          ou toque no botão abaixo — os arquivos ficam salvos neste dispositivo e tocam em sequência dentro do carro,
+          inclusive depois de fechar esta janela.
         </div>
         <button className="vu-btn vu-btn-primary" onClick={() => fileInputRef.current?.click()}>
           <Upload size={14} /> Importar músicas
@@ -175,53 +166,56 @@ export const CustomMusicPanel: React.FC = () => {
             e.target.value = '';
           }}
         />
-        {error && (
-          <div style={{ fontSize: 11, color: '#ef233c', marginTop: 8 }}>{error}</div>
+        {(error || player.error) && (
+          <div style={{ fontSize: 11, color: '#ef233c', marginTop: 8 }}>
+            {player.error ?? error}
+          </div>
         )}
       </div>
 
       {/* Transport + queue controls */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          margin: '14px 0 10px',
-          flexWrap: 'wrap',
-        }}
-      >
-        <button className="vu-btn vu-btn-icon" onClick={() => customMusicPlayer.previous()} title="Anterior" disabled={tracks.length === 0}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '14px 0 8px', flexWrap: 'wrap' }}>
+        <button className="vu-btn vu-btn-icon" onClick={() => audioEngine.customPrevious()} title="Anterior" disabled={playable === 0}>
           <SkipBack size={16} />
         </button>
         <button
           className="vu-btn vu-btn-icon"
           style={{ background: '#ff9500', color: '#000', border: 'none', width: 44, height: 44 }}
-          onClick={() => {
-            audioEngine.init();
-            audioEngine.setStation('custom_usb');
-            customMusicPlayer.toggle();
-          }}
+          onClick={() => audioEngine.customToggle()}
           title={player.playing ? 'Pausar' : 'Tocar'}
-          disabled={tracks.length === 0}
+          disabled={playable === 0}
         >
           {player.playing ? <Pause size={18} /> : <Play size={18} />}
         </button>
-        <button className="vu-btn vu-btn-icon" onClick={() => customMusicPlayer.next()} title="Próxima" disabled={tracks.length === 0}>
+        <button className="vu-btn vu-btn-icon" onClick={() => audioEngine.customNext()} title="Próxima" disabled={playable === 0}>
           <SkipForward size={16} />
         </button>
         <div style={{ flex: 1, minWidth: 140 }}>
           <div style={{ fontSize: 13, fontWeight: 800, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-            {nowPlaying ? nowPlaying.name : tracks.length > 0 ? 'Pronto para tocar' : 'Nenhuma música importada'}
+            {nowPlaying ? nowPlaying.name : playable > 0 ? 'Pronto para tocar' : 'Nenhuma música importada'}
           </div>
-          <div style={{ fontSize: 11, color: '#94a3b8' }}>
-            {tracks.length} faixa(s) • {player.playing ? 'tocando' : 'pausado'}
+          <div style={{ fontSize: 11, color: player.status === 'error' ? '#ef233c' : '#94a3b8' }}>
+            {playable} faixa(s) • {STATUS_LABEL[player.status]}
+            {duration ? ` • ${formatDuration(player.currentTime)} / ${formatDuration(duration)}` : ''}
           </div>
         </div>
         {modeBtn('sequential', <ListMusic size={14} />, 'Sequencial')}
         {modeBtn('loop_one', <Repeat1 size={14} />, 'Repetir uma')}
         {modeBtn('shuffle', <Shuffle size={14} />, 'Aleatória')}
-        {modeBtn('sequential', <Repeat size={14} />, '')}
       </div>
+
+      {/* Real progress / seek */}
+      {duration && duration > 0 && (
+        <input
+          type="range"
+          min={0}
+          max={1000}
+          value={Math.round(progress * 1000)}
+          onChange={(e) => customMusicPlayer.seek(Number(e.target.value) / 1000)}
+          title="Posição da faixa"
+          style={{ width: '100%', margin: '0 0 12px' }}
+        />
+      )}
 
       {/* Volume (independent from engine/SFX) */}
       <div className="vu-slider-row" style={{ marginBottom: 12 }}>
@@ -238,8 +232,8 @@ export const CustomMusicPanel: React.FC = () => {
 
       {/* Track list */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: '38vh', overflowY: 'auto', paddingRight: 4 }}>
-        {tracks.map((t, i) => {
-          const active = player.index === i;
+        {tracks.map((t) => {
+          const active = player.trackId === t.id;
           return (
             <div
               key={t.id}
@@ -256,8 +250,9 @@ export const CustomMusicPanel: React.FC = () => {
               <button
                 className="vu-btn vu-btn-icon"
                 style={{ width: 34, height: 34, borderRadius: 8 }}
-                onClick={() => (active ? customMusicPlayer.toggle() : playTrack(i))}
+                onClick={() => (active ? audioEngine.customToggle() : playTrack(t))}
                 title={active && player.playing ? 'Pausar' : 'Tocar'}
+                disabled={!t.url}
               >
                 {active && player.playing ? <Pause size={14} /> : <Play size={14} />}
               </button>
@@ -267,6 +262,7 @@ export const CustomMusicPanel: React.FC = () => {
                 </div>
                 <div style={{ fontSize: 10, color: '#64748b' }}>
                   {formatDuration(durations[t.id] ?? null)} • {formatSize(t.size)}
+                  {!t.url ? ' • arquivo indisponível' : ''}
                 </div>
               </div>
               {active && player.playing && (
